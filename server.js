@@ -32,6 +32,10 @@ app.use('/api/testimonials', require('./routes/testimonialRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
 app.use('/api/blogs', require('./routes/blogRoutes'));
 
+app.get("/", (req, res) => {
+  res.status(200).send("Backend is running ✔");
+});
+
 // Dynamic OG Tags for Social Media Bots
 const Blog = require('./models/Blog');
 app.get('/blogs/:idOrSlug', async (req, res, next) => {
