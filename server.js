@@ -120,9 +120,18 @@ app.get("/blogs/:idOrSlug", async (req, res, next) => {
 
       if (!blog) return res.status(404).send("Blog not found");
 
-      const imageUrl = blog.image
-        ? `${process.env.SERVER_URL}/${blog.image.replace(/\\/g, "/")}`
-        : `${process.env.SERVER_URL}/default-og.jpg`;
+      let imageUrl = blog.image || "default-og.jpg";
+
+      // If it's a relative path (local upload), prepend server URL
+      if (imageUrl && !imageUrl.startsWith("http")) {
+        imageUrl = `${process.env.SERVER_URL}/${imageUrl.replace(/\\/g, "/")}`;
+      } else if (!imageUrl && !blog.image) {
+        // Fallback if generic default
+        imageUrl = `${process.env.SERVER_URL}/default-og.jpg`;
+      }
+
+      // If it is ALREADY an http/s URL (S3), we use it as is.
+
       const description =
         blog.excerpt ||
         blog.content.substring(0, 150).replace(/<[^>]*>?/gm, "");

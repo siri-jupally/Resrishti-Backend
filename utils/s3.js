@@ -78,4 +78,40 @@ const uploadTaskAttachment = async ({
   return { bucket, key, fileName: safeName };
 };
 
-module.exports = { uploadTaskAttachment, sanitizeFileName, getS3Client };
+/**
+ * Generic upload of a buffer to S3.
+ *
+ * @param {Object} params
+ * @param {string} params.folder - Folder prefix (e.g., 'blogs', 'avatars').
+ * @param {Buffer} params.buffer - File bytes.
+ * @param {string} params.originalName - Original file name.
+ * @param {string} [params.contentType] - MIME type.
+ * @returns {Promise<{bucket: string, key: string, location: string}>}
+ */
+const uploadFile = async ({
+  folder,
+  buffer,
+  originalName,
+  contentType,
+}) => {
+  const bucket = process.env.S3_BUCKET_NAME;
+  if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
+
+  const safeName = sanitizeFileName(originalName);
+  const key = `${folder}/${Date.now()}-${safeName}`;
+
+  const client = getS3Client();
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType || "application/octet-stream",
+  });
+
+  await client.send(command);
+
+  // Return generic info plus the Location equivalent (key)
+  return { bucket, key, url: key }; // We return key as url for consistency with specific internal logic if needed, or we can construct full URL
+};
+
+module.exports = { uploadTaskAttachment, sanitizeFileName, getS3Client, uploadFile };
