@@ -22,9 +22,29 @@ jobs:
     needs: build
     runs-on: self-hosted 
     steps:
+      - name: Clean up docker space
+        run: docker system prune -f
       - name: Pull image from docker hub
         run: docker pull  sirijupally/nodejs-app:latest 
       - name: Delete old container
         run: docker rm -f nodejs-app-container  
       - name: Run Docker Container
-        run: docker run -d -p 4000:4000 --name nodejs-app-container -e MONGO_PASSWORD='${{ secrets.MONGO_PASSWORD }}' sirijupally/nodejs-app
+        run: |
+          docker run -d \
+            -p 4000:4000 \
+            --name nodejs-app-container \
+            -e AWS_REGION='ap-south-1' \
+            -e AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
+            -e AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
+            -e S3_BUCKET_NAME='resrishti' \
+            -e MONGO_URI='mongodb+srv://jupally_siri:${{ secrets.MONGO_PASS }}@cluster1.rtxdwgf.mongodb.net/?appName=cluster1' \
+            -e JWT_SECRET='${{ secrets.JWT_SECRET }}' \
+            -e SMTP_HOST='smtp.gmail.com' \
+            -e SMTP_PORT='587' \
+            -e SMTP_USER='siri21.jupally@gmail.com' \
+            -e SMTP_PASS='${{ secrets.SMTP_PASS }}' \
+            -e FROM_EMAIL='siri21.jupally@gmail.com' \
+            -e CLIENT_URL='http://localhost:5173' \
+            -e SERVER_URL='http://localhost:5000' \
+            -e NODE_ENV='production' \
+            sirijupally/nodejs-app
