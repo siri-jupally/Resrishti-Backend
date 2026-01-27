@@ -25,10 +25,12 @@ const Manager = require("../models/Manager");
 const Employee = require("../models/Employee");
 const Task = require("../models/Task");
 const jwt = require("jsonwebtoken");
-const nodemailer = require("nodemailer");
+
+const { sendEmail } = require("../utils/emailService");
 const multer = require("multer");
 const { uploadTaskAttachment } = require("../utils/s3");
 const bcrypt = require("bcryptjs"); // Ensure bcrypt is available for password hashing
+const { getIo } = require("../socketHandler");
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -157,11 +159,18 @@ const updateEmployee = async (req, res) => {
 const createTask = [
   upload.single("file"),
   async (req, res) => {
-    const { title, description, priority, employeeId, deadline } = req.body;
+    const { title, description, priority, employeeId, deadline, collaboratorIds } = req.body;
     try {
       const employee = await Employee.findById(employeeId);
       if (!employee)
         return res.status(404).json({ message: "Employee not found" });
+
+      // Parse collaborators if provided (can be string array or single string)
+      let collaborators = [];
+      if (collaboratorIds) {
+        const ids = Array.isArray(collaboratorIds) ? collaboratorIds : [collaboratorIds];
+        collaborators = await Employee.find({ _id: { $in: ids } });
+      }
 
       // Retry on rare collisions.
       let taskID;
@@ -190,6 +199,8 @@ const createTask = [
           messages.push({
             text: "Attached document during task creation.",
             by: "manager",
+            senderName: "Manager",
+            senderId: req.manager._id,
             time: new Date(),
             fileName: uploadRes.fileName,
             s3Key: uploadRes.key,
@@ -210,73 +221,40 @@ const createTask = [
         employee: employee._id,
         manager: req.manager._id,
         deadline: parseOptionalDate(deadline),
+        collaborators: collaborators.map(c => c._id),
         messages,
       });
 
-      // Send email notification. If SMTP env vars provided, use them; otherwise use Ethereal test account for local dev
-      try {
-        let transporter;
-        if (process.env.SMTP_HOST && process.env.SMTP_USER) {
-          transporter = nodemailer.createTransport({
-            host: process.env.SMTP_HOST,
-            port: Number(process.env.SMTP_PORT) || 587,
-            secure: process.env.SMTP_SECURE === "true",
-            auth: {
-              user: process.env.SMTP_USER,
-              pass: process.env.SMTP_PASS,
-            },
-          });
-        } else {
-          // Use Ethereal test account for development so emails can be previewed
-          const testAccount = await nodemailer.createTestAccount();
-          transporter = nodemailer.createTransport({
-            host: "smtp.ethereal.email",
-            port: 587,
-            secure: false,
-            auth: {
-              user: testAccount.user,
-              pass: testAccount.pass,
-            },
-          });
-        }
+      // Send email notifications
+      const dashboardUrl = `${process.env.CLIENT_URL || process.env.SERVER_URL || "http://localhost:5173"}/employee/dashboard`;
 
-        const dashboardUrl = `${process.env.CLIENT_URL ||
-          process.env.SERVER_URL ||
-          "http://localhost:5173"
-          }/employee/dashboard`;
-
-        const info = await transporter.sendMail({
-          from:
-            process.env.FROM_EMAIL ||
-            process.env.SMTP_USER ||
-            "no-reply@example.com",
-          to: employee.email,
-          subject: `New Task Assigned: ${title}`,
-          text: `You have been assigned a new task by ${req.manager.email}.
+      const emailSubject = `New Task Assigned: ${title}`;
+      const emailText = `You have been assigned a new task by ${req.manager.email}.
 Title: ${title}
 Description: ${description}
 Priority: ${priority}
+Role: ${collaborators.length > 0 ? "Collaborator/Primary" : "Assignee"}
 ${req.file ? `Attachment: ${req.file.originalname}` : ""}
 
-Open your dashboard to view and update the task: ${dashboardUrl}
-`,
-          html: `<p>You have been assigned a new task by <strong>${req.manager.email
-            }</strong>.</p>
-                 <p><strong>Title:</strong> ${title}<br/>
-                 <strong>Description:</strong> ${description || "-"}<br/>
-                 <strong>Priority:</strong> ${priority || "-"}<br/>
-                 ${req.file ? `<strong>Attachment:</strong> ${req.file.originalname}` : ""}
-                 </p>
-                 <p><a href="${dashboardUrl}">Open your dashboard</a> to view and update the task.</p>`,
-        });
+Open your dashboard: ${dashboardUrl}`;
 
-        // If using Ethereal, log preview URL
-        if (nodemailer.getTestMessageUrl && info) {
-          const preview = nodemailer.getTestMessageUrl(info);
-          if (preview) console.log("Ethereal preview URL:", preview);
+      const emailHtml = `<p>You have been assigned a new task by <strong>${req.manager.email}</strong>.</p>
+             <p><strong>Title:</strong> ${title}<br/>
+             <strong>Description:</strong> ${description || "-"}<br/>
+             <strong>Priority:</strong> ${priority || "-"}<br/>
+             ${req.file ? `<strong>Attachment:</strong> ${req.file.originalname}` : ""}
+             </p>
+             <p><a href="${dashboardUrl}">Open your dashboard</a> to view the task.</p>`;
+
+      // Notify Primary
+      await sendEmail(employee.email, emailSubject, emailText, emailHtml);
+
+      // Notify Collaborators
+      if (collaborators.length > 0) {
+        // Send individually or bcc
+        for (const col of collaborators) {
+          await sendEmail(col.email, `[Collaborator] ${emailSubject}`, emailText, emailHtml);
         }
-      } catch (err) {
-        console.error("Failed to send task email:", err.message);
       }
 
       res.status(201).json(task);
@@ -289,10 +267,9 @@ Open your dashboard to view and update the task: ${dashboardUrl}
 // GET /api/manager/tasks
 const listTasks = async (req, res) => {
   try {
-    const tasks = await Task.find({ manager: req.manager._id }).populate(
-      "employee",
-      "name email"
-    );
+    const tasks = await Task.find({ manager: req.manager._id })
+      .populate("employee", "name email")
+      .populate("collaborators", "name email");
     const assigned = tasks;
     const updates = tasks.filter((t) => t.employeeEdited === true);
     res.json({ assigned, updates });
@@ -320,10 +297,24 @@ const postMessageToTaskAsManager = async (req, res) => {
     task.messages.push({
       text: trimmed,
       by: "manager",
+      senderName: "Manager",
+      senderId: req.manager._id,
       time: new Date(),
     });
 
     await task.save();
+
+    // Emit socket event
+    try {
+      const io = getIo();
+      io.to(`task_${task._id}`).emit("message:new", {
+        taskId: task._id,
+        message: task.messages[task.messages.length - 1],
+      });
+    } catch (socketErr) {
+      console.error("Socket emit error:", socketErr);
+    }
+
     res.status(201).json(task);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -355,6 +346,8 @@ const uploadAttachmentAndPostMessageAsManager = [
       task.messages.push({
         text: text || undefined,
         by: "manager",
+        senderName: "Manager",
+        senderId: req.manager._id,
         time: new Date(),
         fileName: uploadRes.fileName,
         s3Key: uploadRes.key,
@@ -362,6 +355,18 @@ const uploadAttachmentAndPostMessageAsManager = [
       });
 
       await task.save();
+
+      // Emit socket event
+      try {
+        const io = getIo();
+        io.to(`task_${task._id}`).emit("message:new", {
+          taskId: task._id,
+          message: task.messages[task.messages.length - 1],
+        });
+      } catch (socketErr) {
+        console.error("Socket emit error:", socketErr);
+      }
+
       res.status(201).json(task);
     } catch (err) {
       res.status(500).json({ message: err.message });

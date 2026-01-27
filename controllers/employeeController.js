@@ -17,9 +17,12 @@
 */
 const Employee = require("../models/Employee");
 const Task = require("../models/Task");
+const Manager = require("../models/Manager"); // needed? populated instead
+const { sendEmail } = require("../utils/emailService");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { uploadTaskAttachment } = require("../utils/s3");
+const { getIo } = require("../socketHandler");
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -47,10 +50,15 @@ const loginEmployee = async (req, res) => {
 // GET /api/employee/tasks
 const listTasksForEmployee = async (req, res) => {
   try {
-    const tasks = await Task.find({ employee: req.employee._id }).populate(
-      "manager",
-      "email name"
-    );
+    const tasks = await Task.find({
+      $or: [
+        { employee: req.employee._id },
+        { collaborators: req.employee._id }
+      ]
+    })
+      .populate("manager", "email name")
+      .populate("employee", "email name") // Populate primary if I'm collaborator
+      .populate("collaborators", "email name");
     res.json(tasks);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -68,16 +76,56 @@ const updateTaskByEmployee = async (req, res) => {
         .json({ message: "Not authorized to update this task" });
 
     const { status, comment } = req.body;
-    if (status) task.status = status;
+
+
+    // Strict check: Only primary employee can change status
+    if (status && String(task.employee) !== String(req.employee._id)) {
+      return res.status(403).json({ message: "Only the primary assignee can change task status." });
+    }
+
+    if (status) {
+      // Check if actually changed to avoid spam?
+      const oldStatus = task.status;
+      task.status = status;
+
+      // Notify Manager of status change
+      if (oldStatus !== status) {
+        // We need manager email. It's not populated on `task` by findById unless we populate.
+        // Let's populate or fetch manager.
+        const manager = await Manager.findById(task.manager);
+        if (manager) {
+          const subject = `Task Status Updated: ${task.title}`;
+          const text = `The status of task "${task.title}" has been updated to "${status}" by ${req.employee.name}.`;
+          await sendEmail(manager.email, subject, text, `<p>${text}</p>`);
+        }
+      }
+    }
     if (comment) {
       task.messages.push({
         text: String(comment).trim(),
+        text: String(comment).trim(),
         by: "employee",
+        senderName: req.employee.name,
+        senderId: req.employee._id,
         time: new Date(),
       });
     }
     task.employeeEdited = true;
     await task.save();
+
+    // Emit socket event if comment added
+    if (comment) {
+      try {
+        const io = getIo();
+        io.to(`task_${task._id}`).emit("message:new", {
+          taskId: task._id,
+          message: task.messages[task.messages.length - 1],
+        });
+      } catch (socketErr) {
+        console.error("Socket emit error:", socketErr);
+      }
+    }
+
     res.json(task);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -97,17 +145,35 @@ const postMessageToTaskAsEmployee = async (req, res) => {
       "email name"
     );
     if (!task) return res.status(404).json({ message: "Task not found" });
-    if (String(task.employee) !== String(req.employee._id))
+    // Authorization: Allow if primary employee OR in collaborators
+    const isPrimary = String(task.employee) === String(req.employee._id);
+    const isCollaborator = task.collaborators && task.collaborators.some(c => String(c) === String(req.employee._id));
+
+    if (!isPrimary && !isCollaborator)
       return res.status(403).json({ message: "Not authorized" });
 
     task.messages.push({
       text: trimmed,
       by: "employee",
+      senderName: req.employee.name,
+      senderId: req.employee._id,
       time: new Date(),
     });
     task.employeeEdited = true;
 
     await task.save();
+
+    // Emit socket event
+    try {
+      const io = getIo();
+      io.to(`task_${task._id}`).emit("message:new", {
+        taskId: task._id,
+        message: task.messages[task.messages.length - 1],
+      });
+    } catch (socketErr) {
+      console.error("Socket emit error:", socketErr);
+    }
+
     res.status(201).json(task);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -124,7 +190,11 @@ const uploadAttachmentAndPostMessageAsEmployee = [
 
       const task = await Task.findById(req.params.id);
       if (!task) return res.status(404).json({ message: "Task not found" });
-      if (String(task.employee) !== String(req.employee._id))
+      // Authorization: Allow if primary employee OR in collaborators
+      const isPrimary = String(task.employee) === String(req.employee._id);
+      const isCollaborator = task.collaborators && task.collaborators.some(c => String(c) === String(req.employee._id));
+
+      if (!isPrimary && !isCollaborator)
         return res.status(403).json({ message: "Not authorized" });
 
       const uploadRes = await uploadTaskAttachment({
@@ -139,6 +209,8 @@ const uploadAttachmentAndPostMessageAsEmployee = [
       task.messages.push({
         text: text || undefined,
         by: "employee",
+        senderName: req.employee.name,
+        senderId: req.employee._id,
         time: new Date(),
         fileName: uploadRes.fileName,
         s3Key: uploadRes.key,
@@ -147,6 +219,18 @@ const uploadAttachmentAndPostMessageAsEmployee = [
       task.employeeEdited = true;
 
       await task.save();
+
+      // Emit socket event
+      try {
+        const io = getIo();
+        io.to(`task_${task._id}`).emit("message:new", {
+          taskId: task._id,
+          message: task.messages[task.messages.length - 1],
+        });
+      } catch (socketErr) {
+        console.error("Socket emit error:", socketErr);
+      }
+
       res.status(201).json(task);
     } catch (err) {
       res.status(500).json({ message: err.message });

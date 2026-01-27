@@ -29,6 +29,10 @@ const { GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getS3Client } = require("./utils/s3");
 
 const app = express();
+const http = require("http");
+const { initSocket } = require("./socketHandler");
+const server = http.createServer(app);
+const io = initSocket(server);
 
 // Middleware
 app.use(helmet());
@@ -176,6 +180,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: "Something went wrong!" });
 });
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5001;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // test change

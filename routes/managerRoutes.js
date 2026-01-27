@@ -10,7 +10,6 @@
   - POST /tasks               -> createTask (protected)
   - GET  /tasks               -> listTasks (protected)
 
-  Notes:
   - Protected routes require a valid manager JWT (use protectManager middleware).
 */
 const express = require("express");
@@ -27,6 +26,8 @@ const {
   updateEmployee,
 } = require("../controllers/managerController");
 const { protectManager } = require("../middleware/authManager");
+const { getIo } = require("../socketHandler");
+
 
 router.post("/login", loginManager);
 router.post("/employees", protectManager, createEmployee);

@@ -20,6 +20,8 @@ const messageSchema = new mongoose.Schema(
   {
     text: { type: String },
     by: { type: String, enum: ["manager", "employee"], required: true },
+    senderName: { type: String }, // For group chat display
+    senderId: { type: mongoose.Schema.Types.ObjectId }, // To distinguish specific users
     time: { type: Date, default: Date.now },
 
     // Optional attachment metadata (actual bytes live in S3)
@@ -56,6 +58,12 @@ const taskSchema = new mongoose.Schema(
       ref: "Manager",
       required: true,
     },
+    collaborators: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
     deadline: { type: Date },
 
     // Thread of messages between manager and employee
@@ -68,6 +76,7 @@ const taskSchema = new mongoose.Schema(
 // Ensure we can efficiently query/filter by manager/employee/status/priority/deadline.
 taskSchema.index({ manager: 1, createdAt: -1 });
 taskSchema.index({ employee: 1, createdAt: -1 });
+taskSchema.index({ collaborators: 1, createdAt: -1 });
 taskSchema.index({ manager: 1, status: 1, priority: 1 });
 taskSchema.index({ employee: 1, status: 1, priority: 1 });
 taskSchema.index({ deadline: 1 });
