@@ -37,7 +37,7 @@ jobs:
             -e AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
             -e AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
             -e S3_BUCKET_NAME='resrishti' \
-            -e MONGO_URI='mongodb+srv://jupally_siri:${{ secrets.MONGO_PASS }}@cluster1.rtxdwgf.mongodb.net/?appName=cluster1' \
+            -e MONGO_URI=mongodb+srv://jupally_siri:${{ secrets.MONGO_PASS }}@cluster1.rtxdwgf.mongodb.net/?appName=cluster1 \
             -e JWT_SECRET='${{ secrets.JWT_SECRET }}' \
             -e SMTP_HOST='smtp.gmail.com' \
             -e SMTP_PORT='587' \
