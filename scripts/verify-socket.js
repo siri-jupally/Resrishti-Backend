@@ -1,7 +1,7 @@
 const { io } = require("socket.io-client");
 
 // Connect to the backend
-const socket = io("http://localhost:5001");
+const socket = io("http://localhost:4000");
 
 const TASK_ID = "TEST-TASK-ID";
 
