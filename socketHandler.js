@@ -5,8 +5,13 @@ let io;
 const initSocket = (server) => {
     io = new Server(server, {
         cors: {
-            origin: "*", // Adjust for production
+            origin: [
+                "https://resrishti.com",          // Production
+                "http://localhost:5173",          // Local Frontend
+                "http://localhost:4000"           // Local Backend (if needed)
+            ],
             methods: ["GET", "POST"],
+            credentials: true
         },
     });
 
