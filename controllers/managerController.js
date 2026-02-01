@@ -369,7 +369,8 @@ const uploadAttachmentAndPostMessageAsManager = [
 
       res.status(201).json(task);
     } catch (err) {
-      res.status(500).json({ message: err.message });
+      console.error("Upload/Message Error:", err);
+      res.status(500).json({ message: err.message, stack: err.stack });
     }
   },
 ];

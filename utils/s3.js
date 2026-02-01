@@ -71,7 +71,6 @@ const uploadTaskAttachment = async ({
     Key: key,
     Body: buffer,
     ContentType: contentType || "application/octet-stream",
-    ACL: 'public-read',
   });
 
   await client.send(command);
