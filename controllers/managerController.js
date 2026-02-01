@@ -327,18 +327,14 @@ const postMessageToTaskAsManager = async (req, res) => {
       });
 
       // Send Push Notification to Employee
-      if (task.employee && task.employee.pushSubscription) {
-        // Populate employee if not already fully populated, but we did populate above.
-        // Actually we only populated 'name email'. We need pushSubscription.
-        // Let's refetch or assume we need to populate generic fields?
-        // Manager model usually doesn't need to be populated for this check unless we fetch task with it.
-        // Better to fetch the employee specifically for the sub or ensure it's in the populate.
+      if (task.employee) {
+        // We only populated 'name email' above, so we must fetch pushSubscription now.
         const empParams = await Employee.findById(task.employee._id).select("pushSubscription");
         if (empParams && empParams.pushSubscription) {
           await sendPush(empParams.pushSubscription, {
             title: "New Message from Manager",
             body: `${trimmed.substring(0, 50)}${trimmed.length > 50 ? "..." : ""}`,
-            icon: "/pwa-192x192.png",
+            icon: "/android-chrome-512x512.png", // Corrected Icon
             data: { url: "/employee/dashboard" }
           });
         }

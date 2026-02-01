@@ -200,12 +200,15 @@ const postMessageToTaskAsEmployee = async (req, res) => {
             });
 
             // Notify Manager
-            const manager = await Manager.findById(task.manager).select("pushSubscription");
+            // task.manager is populated with name/email only.
+            // We need to use task.manager._id (since it is an object due to populate)
+            const managerId = task.manager._id || task.manager;
+            const manager = await Manager.findById(managerId).select("pushSubscription");
             if (manager && manager.pushSubscription) {
                 await sendPush(manager.pushSubscription, {
                     title: "New Message from Employee",
                     body: `${req.employee.name}: ${trimmed.substring(0, 50)}...`,
-                    icon: "/pwa-192x192.png",
+                    icon: "/android-chrome-512x512.png",
                     data: { url: "/manager/dashboard" }
                 });
             }
