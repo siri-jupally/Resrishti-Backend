@@ -82,7 +82,10 @@ app.get("/api/attachments/download", async (req, res) => {
     const name = fileName || String(key).split("/").pop() || "attachment";
     // Ensure filename is safe in header
     const safeName = String(name).replace(/[^\w\-.() ]/g, "_");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeName}"`);
+
+    // Check for inline viewing request
+    const disposition = req.query.inline === "true" ? "inline" : "attachment";
+    res.setHeader("Content-Disposition", `${disposition}; filename="${safeName}"`);
 
     // data.Body is a stream in Node.js; pipe to response
     const stream = data.Body;
