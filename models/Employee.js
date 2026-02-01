@@ -34,6 +34,7 @@ const employeeSchema = new mongoose.Schema(
       ref: "Manager",
       required: true,
     },
+    pushSubscription: { type: Object }, // Store the VAPID subscription object
   },
   { timestamps: true }
 );

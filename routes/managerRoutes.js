@@ -25,6 +25,7 @@ const {
   deleteEmployee,
   updateEmployee,
 } = require("../controllers/managerController");
+const { subscribe } = require("../controllers/notificationController");
 const { protectManager } = require("../middleware/authManager");
 const { getIo } = require("../socketHandler");
 
@@ -44,5 +45,7 @@ router.post(
   protectManager,
   uploadAttachmentAndPostMessageAsManager
 );
+
+router.post("/subscribe", protectManager, subscribe);
 
 module.exports = router;

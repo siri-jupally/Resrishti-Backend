@@ -1,15 +1,15 @@
 /*
-	Employee routes
+  Employee routes
 
-	Endpoints mounted at: /api/employee
+  Endpoints mounted at: /api/employee
 
-	Routes:
-	- POST /login               -> loginEmployee
-	- GET  /tasks               -> listTasksForEmployee (protected)
-	- PATCH /tasks/:id          -> updateTaskByEmployee (protected)
+  Routes:
+  - POST /login               -> loginEmployee
+  - GET  /tasks               -> listTasksForEmployee (protected)
+  - PATCH /tasks/:id          -> updateTaskByEmployee (protected)
 
-	Notes:
-	- Protected routes require a valid employee JWT (use protectEmployee middleware).
+  Notes:
+  - Protected routes require a valid employee JWT (use protectEmployee middleware).
 */
 const express = require("express");
 const router = express.Router();
@@ -20,6 +20,7 @@ const {
   postMessageToTaskAsEmployee,
   uploadAttachmentAndPostMessageAsEmployee,
 } = require("../controllers/employeeController");
+const { subscribe } = require("../controllers/notificationController");
 const { protectEmployee } = require("../middleware/authEmployee");
 
 router.post("/login", loginEmployee);
@@ -37,5 +38,7 @@ router.post(
   protectEmployee,
   uploadAttachmentAndPostMessageAsEmployee
 );
+
+router.post("/subscribe", protectEmployee, subscribe);
 
 module.exports = router;

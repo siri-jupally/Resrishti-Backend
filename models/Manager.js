@@ -30,6 +30,7 @@ const managerSchema = new mongoose.Schema(
       trim: true,
     },
     password: { type: String, required: true },
+    pushSubscription: { type: Object }, // Store the VAPID subscription object
   },
   { timestamps: true }
 );
