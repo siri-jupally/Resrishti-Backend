@@ -109,7 +109,7 @@ const updateTaskByEmployee = async (req, res) => {
                             title: "Task Status Updated",
                             body: `${req.employee.name} changed status of "${task.title}" to ${status}`,
                             icon: "/pwa-192x192.png",
-                            data: { url: "/manager/dashboard" }
+                            data: { url: `/manager/dashboard?taskId=${task._id}` }
                         });
                     }
                 }
@@ -133,7 +133,7 @@ const updateTaskByEmployee = async (req, res) => {
                         title: "New Comment on Task",
                         body: `${req.employee.name}: ${String(comment).trim().substring(0, 50)}...`,
                         icon: "/pwa-192x192.png",
-                        data: { url: "/manager/dashboard" }
+                        data: { url: `/manager/dashboard?taskId=${task._id}` }
                     });
                 }
             } catch (e) {
@@ -209,7 +209,7 @@ const postMessageToTaskAsEmployee = async (req, res) => {
                     title: "New Message from Employee",
                     body: `${req.employee.name}: ${trimmed.substring(0, 50)}...`,
                     icon: "/android-chrome-512x512.png",
-                    data: { url: "/manager/dashboard" }
+                    data: { url: `/manager/dashboard?taskId=${task._id}` }
                 });
             }
 
@@ -278,7 +278,7 @@ const uploadAttachmentAndPostMessageAsEmployee = [
                         title: "New Attachment from Employee",
                         body: `${req.employee.name} sent an attachment.`,
                         icon: "/pwa-192x192.png",
-                        data: { url: "/manager/dashboard" }
+                        data: { url: `/manager/dashboard?taskId=${task._id}` }
                     });
                 }
 

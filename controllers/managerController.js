@@ -263,9 +263,9 @@ Open your dashboard: ${dashboardUrl}`;
         const pushPayload = {
           title: "New Task Assigned",
           body: `You have a new task: ${title}`,
-          icon: "/pwa-192x192.png", // Ensure this path is correct for your PWA
+          icon: "/android-chrome-512x512.png", // Ensure this path is correct for your PWA
           data: {
-            url: "/employee/dashboard" // Open dashboard on click
+            url: `/employee/dashboard?taskId=${task._id}` // Open dashboard with specific task
           }
         };
         await sendPush(employee.pushSubscription, pushPayload);
@@ -335,7 +335,7 @@ const postMessageToTaskAsManager = async (req, res) => {
             title: "New Message from Manager",
             body: `${trimmed.substring(0, 50)}${trimmed.length > 50 ? "..." : ""}`,
             icon: "/android-chrome-512x512.png", // Corrected Icon
-            data: { url: "/employee/dashboard" }
+            data: { url: `/employee/dashboard?taskId=${task._id}` }
           });
         }
       }
