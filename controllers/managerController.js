@@ -31,6 +31,7 @@ const multer = require("multer");
 const { uploadTaskAttachment } = require("../utils/s3");
 const bcrypt = require("bcryptjs"); // Ensure bcrypt is available for password hashing
 const { getIo } = require("../socketHandler");
+const { sendPush } = require("../utils/push");
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -257,6 +258,19 @@ Open your dashboard: ${dashboardUrl}`;
         }
       }
 
+      // Send Push Notification to Primary Assignee
+      if (employee.pushSubscription) {
+        const pushPayload = {
+          title: "New Task Assigned",
+          body: `You have a new task: ${title}`,
+          icon: "/pwa-192x192.png", // Ensure this path is correct for your PWA
+          data: {
+            url: "/employee/dashboard" // Open dashboard on click
+          }
+        };
+        await sendPush(employee.pushSubscription, pushPayload);
+      }
+
       res.status(201).json(task);
     } catch (err) {
       res.status(500).json({ message: err.message });
@@ -311,8 +325,27 @@ const postMessageToTaskAsManager = async (req, res) => {
         taskId: task._id,
         message: task.messages[task.messages.length - 1],
       });
+
+      // Send Push Notification to Employee
+      if (task.employee && task.employee.pushSubscription) {
+        // Populate employee if not already fully populated, but we did populate above.
+        // Actually we only populated 'name email'. We need pushSubscription.
+        // Let's refetch or assume we need to populate generic fields?
+        // Manager model usually doesn't need to be populated for this check unless we fetch task with it.
+        // Better to fetch the employee specifically for the sub or ensure it's in the populate.
+        const empParams = await Employee.findById(task.employee._id).select("pushSubscription");
+        if (empParams && empParams.pushSubscription) {
+          await sendPush(empParams.pushSubscription, {
+            title: "New Message from Manager",
+            body: `${trimmed.substring(0, 50)}${trimmed.length > 50 ? "..." : ""}`,
+            icon: "/pwa-192x192.png",
+            data: { url: "/employee/dashboard" }
+          });
+        }
+      }
+
     } catch (socketErr) {
-      console.error("Socket emit error:", socketErr);
+      console.error("Socket/Push error:", socketErr);
     }
 
     res.status(201).json(task);
