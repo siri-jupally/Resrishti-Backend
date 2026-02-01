@@ -50,5 +50,4 @@ jobs:
             -e VAPID_PUBLIC_KEY='BJxnYrTfAhkQFtbXOIKC1SFXUd5rc2tB_2vgiaV2dzVWGS8OSVRZDwpsRoP2Jojr_LQGvKCVLKgCNgyFfA-Ed8A' \
             -e VAPID_PRIVATE_KEY='XzAeIms4QojUrLDz9E2cKhs5-fbpDTQ0KZfv4svO1Kk' \
             -e VAPID_MAILTO='mailto:admin@resrishti.com' \
-
             sirijupally/nodejs-app
