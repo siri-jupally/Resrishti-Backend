@@ -7,6 +7,7 @@ const initSocket = (server) => {
         cors: {
             origin: [
                 "https://resrishti.com",          // Production
+                "https://www.resrishti.com",      // Production (www)
                 "http://localhost:5173",          // Local Frontend
                 "http://localhost:4000"           // Local Backend (if needed)
             ],
