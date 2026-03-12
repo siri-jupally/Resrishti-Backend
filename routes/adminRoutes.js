@@ -7,6 +7,13 @@ const {
     deleteTestimonial,
     seedAdmin
 } = require('../controllers/adminController');
+const {
+    getPolicy,
+    updatePolicy,
+    addHoliday,
+    removeHoliday,
+    getReports,
+} = require('../controllers/attendanceAdminController');
 const { protect } = require('../middleware/authMiddleware');
 
 router.post('/login', loginAdmin);
@@ -18,5 +25,12 @@ router.route('/testimonials')
 router.route('/testimonials/:id')
     .patch(protect, updateTestimonialStatus)
     .delete(protect, deleteTestimonial);
+
+// Attendance policy & reports routes
+router.get('/attendance/policy', protect, getPolicy);
+router.put('/attendance/policy', protect, updatePolicy);
+router.post('/attendance/policy/holidays', protect, addHoliday);
+router.delete('/attendance/policy/holidays/:id', protect, removeHoliday);
+router.get('/attendance/reports', protect, getReports);
 
 module.exports = router;

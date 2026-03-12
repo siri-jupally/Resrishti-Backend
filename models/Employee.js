@@ -35,6 +35,15 @@ const employeeSchema = new mongoose.Schema(
       required: true,
     },
     pushSubscription: { type: Object }, // Store the VAPID subscription object
+    homeLocation: {
+      lat: { type: Number },
+      lng: { type: Number },
+    },
+    defaultWorkMode: {
+      type: String,
+      enum: ["WFO", "WFH", "remote"],
+      default: "WFO",
+    },
   },
   { timestamps: true }
 );

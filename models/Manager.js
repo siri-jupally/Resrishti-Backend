@@ -31,6 +31,7 @@ const managerSchema = new mongoose.Schema(
     },
     password: { type: String, required: true },
     pushSubscription: { type: Object }, // Store the VAPID subscription object
+    role: { type: String, default: "manager" },
   },
   { timestamps: true }
 );

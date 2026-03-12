@@ -9,6 +9,7 @@
   - GET  /employees           -> listEmployees (protected)
   - POST /tasks               -> createTask (protected)
   - GET  /tasks               -> listTasks (protected)
+  - Attendance & Leave management routes (protected)
 
   - Protected routes require a valid manager JWT (use protectManager middleware).
 */
@@ -25,6 +26,16 @@ const {
   deleteEmployee,
   updateEmployee,
 } = require("../controllers/managerController");
+const {
+  getTeamAttendance,
+  getTeamSummary,
+  approveAttendance,
+  setEmployeeWorkMode,
+  getCorrectionRequests,
+  reviewCorrection,
+  getLeaveRequests,
+  reviewLeave,
+} = require("../controllers/attendanceManagerController");
 const { subscribe } = require("../controllers/notificationController");
 const { protectManager } = require("../middleware/authManager");
 const { getIo } = require("../socketHandler");
@@ -45,6 +56,18 @@ router.post(
   protectManager,
   uploadAttachmentAndPostMessageAsManager
 );
+
+// Attendance routes
+router.get("/attendance/team", protectManager, getTeamAttendance);
+router.get("/attendance/team/summary", protectManager, getTeamSummary);
+router.patch("/attendance/:id/approve", protectManager, approveAttendance);
+router.patch("/employees/:id/workmode", protectManager, setEmployeeWorkMode);
+router.get("/attendance/corrections", protectManager, getCorrectionRequests);
+router.patch("/attendance/corrections/:id", protectManager, reviewCorrection);
+
+// Leave routes
+router.get("/leaves", protectManager, getLeaveRequests);
+router.patch("/leaves/:id", protectManager, reviewLeave);
 
 router.post("/subscribe", protectManager, subscribe);
 

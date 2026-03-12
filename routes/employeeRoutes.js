@@ -7,6 +7,7 @@
   - POST /login               -> loginEmployee
   - GET  /tasks               -> listTasksForEmployee (protected)
   - PATCH /tasks/:id          -> updateTaskByEmployee (protected)
+  - Attendance & Leave routes (protected)
 
   Notes:
   - Protected routes require a valid employee JWT (use protectEmployee middleware).
@@ -20,6 +21,17 @@ const {
   postMessageToTaskAsEmployee,
   uploadAttachmentAndPostMessageAsEmployee,
 } = require("../controllers/employeeController");
+const {
+  checkIn,
+  checkOut,
+  getToday,
+  getCalendar,
+  submitCorrection,
+  getCorrections,
+  getLeaves,
+  applyLeave,
+  getPolicy,
+} = require("../controllers/attendanceController");
 const { subscribe } = require("../controllers/notificationController");
 const { protectEmployee } = require("../middleware/authEmployee");
 
@@ -39,6 +51,20 @@ router.post(
   uploadAttachmentAndPostMessageAsEmployee
 );
 
+// Attendance routes
+router.post("/attendance/checkin", protectEmployee, checkIn);
+router.post("/attendance/checkout", protectEmployee, checkOut);
+router.get("/attendance/today", protectEmployee, getToday);
+router.get("/attendance/calendar", protectEmployee, getCalendar);
+router.post("/attendance/correction", protectEmployee, submitCorrection);
+router.get("/attendance/corrections", protectEmployee, getCorrections);
+router.get("/attendance/policy", protectEmployee, getPolicy);
+
+// Leave routes
+router.get("/leaves", protectEmployee, getLeaves);
+router.post("/leaves", protectEmployee, applyLeave);
+
 router.post("/subscribe", protectEmployee, subscribe);
 
 module.exports = router;
+
