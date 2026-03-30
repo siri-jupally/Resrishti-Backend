@@ -1,32 +1,30 @@
 /*
-  Attendance Controller (Employee-facing)
+  Manager Self-Attendance Controller
 
-  Purpose:
-  - Handles employee attendance operations:
-    - checkIn: POST /api/employee/attendance/checkin
-    - checkOut: POST /api/employee/attendance/checkout
-    - getToday: GET /api/employee/attendance/today
-    - getCalendar: GET /api/employee/attendance/calendar
-    - submitCorrection: POST /api/employee/attendance/correction
-    - getCorrections: GET /api/employee/attendance/corrections
-    - getLeaves: GET /api/employee/leaves
-    - applyLeave: POST /api/employee/leaves
+  Mirrors the employee attendance controller exactly, but for managers.
+  Admin takes the role that Manager plays for employees.
 
-  Notes:
-  - Geo-boundary validation uses Haversine formula.
-  - Working hours are auto-calculated on checkout.
+  Routes (mounted at /api/manager/self-attendance):
+    - checkIn:          POST /checkin
+    - checkOut:         POST /checkout
+    - getToday:         GET  /today
+    - getCalendar:      GET  /calendar
+    - submitCorrection: POST /correction
+    - getCorrections:   GET  /corrections
+    - getLeaves:        GET  /leaves
+    - applyLeave:       POST /leaves
+    - getPolicy:        GET  /policy
 */
-const Attendance = require("../models/Attendance");
+const ManagerAttendance = require("../models/ManagerAttendance");
+const ManagerLeave = require("../models/ManagerLeave");
+const ManagerCorrectionRequest = require("../models/ManagerCorrectionRequest");
 const AttendancePolicy = require("../models/AttendancePolicy");
-const CorrectionRequest = require("../models/CorrectionRequest");
-const Leave = require("../models/Leave");
-const Manager = require("../models/Manager");
 const Admin = require("../models/Admin");
 const { sendPush } = require("../utils/push");
 
-// Haversine distance in meters between two lat/lng points
+// Haversine distance in meters
 function haversineDistance(lat1, lng1, lat2, lng2) {
-    const R = 6371000; // Earth's radius in meters
+    const R = 6371000;
     const toRad = (deg) => (deg * Math.PI) / 180;
     const dLat = toRad(lat2 - lat1);
     const dLng = toRad(lng2 - lng1);
@@ -36,58 +34,61 @@ function haversineDistance(lat1, lng1, lat2, lng2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Get today's date as YYYY-MM-DD string
 function getTodayStr() {
-    const now = new Date();
-    return now.toISOString().split("T")[0];
+    return new Date().toISOString().split("T")[0];
 }
 
-// Parse HH:MM time string to { hours, minutes }
 function parseTime(timeStr) {
     const [h, m] = timeStr.split(":").map(Number);
     return { hours: h, minutes: m };
 }
 
-// POST /api/employee/attendance/checkin
+// Notify all admins via push
+async function notifyAdmins(payload) {
+    try {
+        const admins = await Admin.find().select("pushSubscription");
+        for (const admin of admins) {
+            if (admin.pushSubscription) {
+                await sendPush(admin.pushSubscription, payload);
+            }
+        }
+    } catch (err) {
+        console.error("Admin push error:", err);
+    }
+}
+
+// POST /api/manager/self-attendance/checkin
 const checkIn = async (req, res) => {
     try {
         const { lat, lng, address, workMode, wfhTaskSummary } = req.body;
-        const employeeId = req.employee._id;
+        const managerId = req.manager._id;
         const today = getTodayStr();
 
-        // Check if already checked in today
-        const existing = await Attendance.findOne({ employee: employeeId, date: today });
+        const existing = await ManagerAttendance.findOne({ manager: managerId, date: today });
         if (existing && existing.checkIn && existing.checkIn.time) {
             return res.status(400).json({ message: "Already checked in today" });
         }
 
-        // Fetch policy for boundary validation
         const policy = await AttendancePolicy.findOne();
         let locationWithinBoundary = null;
         let isLateCheckIn = false;
 
         if (lat !== undefined && lng !== undefined) {
-            // Check against office locations (for WFO) or home location (for WFH)
-            const effectiveWorkMode = workMode || req.employee.defaultWorkMode || "WFO";
+            const effectiveWorkMode = workMode || "WFO";
 
             if (effectiveWorkMode === "WFO" && policy && policy.officeLocations.length > 0) {
                 locationWithinBoundary = policy.officeLocations.some((loc) => {
                     const dist = haversineDistance(lat, lng, loc.lat, loc.lng);
                     return dist <= loc.radiusMeters;
                 });
-            } else if (effectiveWorkMode === "WFH" && req.employee.homeLocation) {
-                const homeLat = req.employee.homeLocation.lat;
-                const homeLng = req.employee.homeLocation.lng;
-                if (homeLat && homeLng) {
-                    const dist = haversineDistance(lat, lng, homeLat, homeLng);
-                    locationWithinBoundary = dist <= 500; // 500m radius for home
-                }
             } else if (effectiveWorkMode === "remote") {
-                locationWithinBoundary = true; // Remote always accepted
+                locationWithinBoundary = true;
+            } else {
+                // WFH - no home location on manager model, accept it
+                locationWithinBoundary = true;
             }
         }
 
-        // Check for late check-in
         if (policy && policy.checkInStartTime) {
             const now = new Date();
             const { hours, minutes } = parseTime(policy.checkInStartTime);
@@ -98,10 +99,9 @@ const checkIn = async (req, res) => {
             }
         }
 
-        const effectiveWorkMode = workMode || req.employee.defaultWorkMode || "WFO";
+        const effectiveWorkMode = workMode || "WFO";
 
         if (existing) {
-            // Record exists (maybe created by leave system) — update it
             existing.checkIn = {
                 time: new Date(),
                 location: lat !== undefined ? { lat, lng, address } : undefined,
@@ -116,8 +116,8 @@ const checkIn = async (req, res) => {
             return res.status(200).json(existing);
         }
 
-        const attendance = await Attendance.create({
-            employee: employeeId,
+        const attendance = await ManagerAttendance.create({
+            manager: managerId,
             date: today,
             checkIn: {
                 time: new Date(),
@@ -131,38 +131,30 @@ const checkIn = async (req, res) => {
             wfhTaskSummary: wfhTaskSummary || undefined,
         });
 
-        // Notify manager if out of boundary
         if (locationWithinBoundary === false) {
-            try {
-                const manager = await Manager.findById(req.employee.manager).select("pushSubscription");
-                if (manager && manager.pushSubscription) {
-                    await sendPush(manager.pushSubscription, {
-                        title: "⚠️ Out-of-Boundary Check-in",
-                        body: `${req.employee.name} checked in from outside the designated area`,
-                        icon: "/android-chrome-512x512.png",
-                        data: { url: "/manager/dashboard?tab=attendance" },
-                    });
-                }
-            } catch (pushErr) {
-                console.error("Push error (attendance):", pushErr);
-            }
+            await notifyAdmins({
+                title: "Out-of-Boundary Check-in (Manager)",
+                body: `${req.manager.name} checked in from outside the designated area`,
+                icon: "/android-chrome-512x512.png",
+                data: { url: "/admin/dashboard?tab=managerAttendance" },
+            });
         }
 
         res.status(201).json(attendance);
     } catch (err) {
-        console.error("CheckIn error:", err);
+        console.error("Manager CheckIn error:", err);
         res.status(500).json({ message: err.message });
     }
 };
 
-// POST /api/employee/attendance/checkout
+// POST /api/manager/self-attendance/checkout
 const checkOut = async (req, res) => {
     try {
         const { lat, lng, address, wfhTaskSummary } = req.body;
-        const employeeId = req.employee._id;
+        const managerId = req.manager._id;
         const today = getTodayStr();
 
-        const attendance = await Attendance.findOne({ employee: employeeId, date: today });
+        const attendance = await ManagerAttendance.findOne({ manager: managerId, date: today });
         if (!attendance || !attendance.checkIn || !attendance.checkIn.time) {
             return res.status(400).json({ message: "No check-in found for today" });
         }
@@ -176,12 +168,10 @@ const checkOut = async (req, res) => {
             location: lat !== undefined ? { lat, lng, address } : undefined,
         };
 
-        // Calculate working hours
         const checkInTime = new Date(attendance.checkIn.time);
         const diffMs = now - checkInTime;
         attendance.workingHours = Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
 
-        // Check for early checkout
         const policy = await AttendancePolicy.findOne();
         if (policy && policy.checkOutMinTime) {
             const { hours, minutes } = parseTime(policy.checkOutMinTime);
@@ -192,7 +182,6 @@ const checkOut = async (req, res) => {
             }
         }
 
-        // Determine half-day status
         if (policy && attendance.workingHours < policy.workingHoursPerDay / 2) {
             attendance.status = "half-day";
         }
@@ -204,17 +193,17 @@ const checkOut = async (req, res) => {
         await attendance.save();
         res.json(attendance);
     } catch (err) {
-        console.error("CheckOut error:", err);
+        console.error("Manager CheckOut error:", err);
         res.status(500).json({ message: err.message });
     }
 };
 
-// GET /api/employee/attendance/today
+// GET /api/manager/self-attendance/today
 const getToday = async (req, res) => {
     try {
         const today = getTodayStr();
-        const attendance = await Attendance.findOne({
-            employee: req.employee._id,
+        const attendance = await ManagerAttendance.findOne({
+            manager: req.manager._id,
             date: today,
         });
         res.json(attendance || { date: today, status: null });
@@ -223,7 +212,7 @@ const getToday = async (req, res) => {
     }
 };
 
-// GET /api/employee/attendance/calendar?month=3&year=2026
+// GET /api/manager/self-attendance/calendar?month=3&year=2026
 const getCalendar = async (req, res) => {
     try {
         const month = parseInt(req.query.month) || new Date().getMonth() + 1;
@@ -234,20 +223,18 @@ const getCalendar = async (req, res) => {
         const endYear = month === 12 ? year + 1 : year;
         const endDate = `${endYear}-${String(endMonth).padStart(2, "0")}-01`;
 
-        const records = await Attendance.find({
-            employee: req.employee._id,
+        const records = await ManagerAttendance.find({
+            manager: req.manager._id,
             date: { $gte: startDate, $lt: endDate },
         }).sort({ date: 1 });
 
-        // Also fetch holidays for this month
         const policy = await AttendancePolicy.findOne();
         const holidays = policy
             ? policy.holidays.filter((h) => h.date >= startDate && h.date < endDate)
             : [];
 
-        // Fetch leaves for this month
-        const leaves = await Leave.find({
-            employee: req.employee._id,
+        const leaves = await ManagerLeave.find({
+            manager: req.manager._id,
             status: "approved",
             startDate: { $lte: endDate },
             endDate: { $gte: startDate },
@@ -259,7 +246,7 @@ const getCalendar = async (req, res) => {
     }
 };
 
-// POST /api/employee/attendance/correction
+// POST /api/manager/self-attendance/correction
 const submitCorrection = async (req, res) => {
     try {
         const { attendanceId, requestedCheckIn, requestedCheckOut, reason } = req.body;
@@ -267,11 +254,11 @@ const submitCorrection = async (req, res) => {
             return res.status(400).json({ message: "attendanceId and reason are required" });
         }
 
-        const attendance = await Attendance.findById(attendanceId);
+        const attendance = await ManagerAttendance.findById(attendanceId);
         if (!attendance) {
             return res.status(404).json({ message: "Attendance record not found" });
         }
-        if (String(attendance.employee) !== String(req.employee._id)) {
+        if (String(attendance.manager) !== String(req.manager._id)) {
             return res.status(403).json({ message: "Not authorized" });
         }
 
@@ -290,8 +277,8 @@ const submitCorrection = async (req, res) => {
             parsedCheckOut = d;
         }
 
-        const correction = await CorrectionRequest.create({
-            employee: req.employee._id,
+        const correction = await ManagerCorrectionRequest.create({
+            manager: req.manager._id,
             attendance: attendanceId,
             date: attendance.date,
             requestedCheckIn: parsedCheckIn || undefined,
@@ -299,20 +286,12 @@ const submitCorrection = async (req, res) => {
             reason,
         });
 
-        // Notify manager
-        try {
-            const manager = await Manager.findById(req.employee.manager).select("pushSubscription");
-            if (manager && manager.pushSubscription) {
-                await sendPush(manager.pushSubscription, {
-                    title: "Attendance Correction Request",
-                    body: `${req.employee.name} submitted a correction for ${attendance.date}`,
-                    icon: "/android-chrome-512x512.png",
-                    data: { url: "/manager/dashboard?tab=attendance&sub=corrections" },
-                });
-            }
-        } catch (pushErr) {
-            console.error("Push error:", pushErr);
-        }
+        await notifyAdmins({
+            title: "Attendance Correction Request (Manager)",
+            body: `${req.manager.name} submitted a correction for ${attendance.date}`,
+            icon: "/android-chrome-512x512.png",
+            data: { url: "/admin/dashboard?tab=managerAttendance" },
+        });
 
         res.status(201).json(correction);
     } catch (err) {
@@ -320,11 +299,11 @@ const submitCorrection = async (req, res) => {
     }
 };
 
-// GET /api/employee/attendance/corrections
+// GET /api/manager/self-attendance/corrections
 const getCorrections = async (req, res) => {
     try {
-        const corrections = await CorrectionRequest.find({
-            employee: req.employee._id,
+        const corrections = await ManagerCorrectionRequest.find({
+            manager: req.manager._id,
         })
             .populate("attendance")
             .sort({ createdAt: -1 });
@@ -334,18 +313,17 @@ const getCorrections = async (req, res) => {
     }
 };
 
-// GET /api/employee/leaves
+// GET /api/manager/self-attendance/leaves
 const getLeaves = async (req, res) => {
     try {
-        const leaves = await Leave.find({ employee: req.employee._id }).sort({ createdAt: -1 });
+        const leaves = await ManagerLeave.find({ manager: req.manager._id }).sort({ createdAt: -1 });
 
-        // Calculate balances (simple: 12 casual, 12 sick, 15 earned per year)
         const year = new Date().getFullYear();
         const yearStart = `${year}-01-01`;
         const yearEnd = `${year + 1}-01-01`;
 
-        const approvedLeaves = await Leave.find({
-            employee: req.employee._id,
+        const approvedLeaves = await ManagerLeave.find({
+            manager: req.manager._id,
             status: "approved",
             startDate: { $gte: yearStart, $lt: yearEnd },
         });
@@ -371,7 +349,7 @@ const getLeaves = async (req, res) => {
     }
 };
 
-// POST /api/employee/leaves
+// POST /api/manager/self-attendance/leaves
 const applyLeave = async (req, res) => {
     try {
         const { type, startDate, endDate, reason } = req.body;
@@ -379,45 +357,20 @@ const applyLeave = async (req, res) => {
             return res.status(400).json({ message: "type, startDate, endDate, and reason are required" });
         }
 
-        const leave = await Leave.create({
-            employee: req.employee._id,
+        const leave = await ManagerLeave.create({
+            manager: req.manager._id,
             type,
             startDate,
             endDate,
             reason,
         });
 
-        // Notify manager
-        try {
-            const manager = await Manager.findById(req.employee.manager).select("pushSubscription");
-            if (manager && manager.pushSubscription) {
-                await sendPush(manager.pushSubscription, {
-                    title: "Leave Request",
-                    body: `${req.employee.name} applied for ${type} leave (${startDate} to ${endDate})`,
-                    icon: "/android-chrome-512x512.png",
-                    data: { url: "/manager/dashboard?tab=attendance&sub=leaves" },
-                });
-            }
-        } catch (pushErr) {
-            console.error("Push error:", pushErr);
-        }
-
-        // Notify all admins of the new leave request
-        try {
-            const admins = await Admin.find().select("pushSubscription");
-            for (const admin of admins) {
-                if (admin.pushSubscription) {
-                    await sendPush(admin.pushSubscription, {
-                        title: "New Leave Request",
-                        body: `${req.employee.name} applied for ${type} leave (${startDate} to ${endDate})`,
-                        icon: "/android-chrome-512x512.png",
-                        data: { url: "/admin/dashboard?tab=leaves" },
-                    });
-                }
-            }
-        } catch (adminPushErr) {
-            console.error("Admin push error:", adminPushErr);
-        }
+        await notifyAdmins({
+            title: "Manager Leave Request",
+            body: `${req.manager.name} applied for ${type} leave (${startDate} to ${endDate})`,
+            icon: "/android-chrome-512x512.png",
+            data: { url: "/admin/dashboard?tab=managerAttendance" },
+        });
 
         res.status(201).json(leave);
     } catch (err) {
@@ -425,7 +378,7 @@ const applyLeave = async (req, res) => {
     }
 };
 
-// GET /api/employee/attendance/policy
+// GET /api/manager/self-attendance/policy
 const getPolicy = async (req, res) => {
     try {
         const policy = await AttendancePolicy.findOne();

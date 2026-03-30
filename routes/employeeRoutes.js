@@ -33,6 +33,13 @@ const {
   getPolicy,
 } = require("../controllers/attendanceController");
 const { subscribe } = require("../controllers/notificationController");
+const {
+  employeeChangePassword,
+  getEmployeeProfile,
+  updateEmployeeProfile,
+  upload: profileUpload,
+} = require("../controllers/profileController");
+const { employeeBatchLocations } = require("../controllers/locationController");
 const { protectEmployee } = require("../middleware/authEmployee");
 
 router.post("/login", loginEmployee);
@@ -63,6 +70,17 @@ router.get("/attendance/policy", protectEmployee, getPolicy);
 // Leave routes
 router.get("/leaves", protectEmployee, getLeaves);
 router.post("/leaves", protectEmployee, applyLeave);
+
+// Profile routes
+router.post("/profile/change-password", protectEmployee, employeeChangePassword);
+router.get("/profile", protectEmployee, getEmployeeProfile);
+router.put("/profile", protectEmployee, profileUpload.fields([
+  { name: "profilePhoto", maxCount: 1 },
+  { name: "idProofDocument", maxCount: 1 },
+]), updateEmployeeProfile);
+
+// Location tracking
+router.post("/location/batch", protectEmployee, employeeBatchLocations);
 
 router.post("/subscribe", protectEmployee, subscribe);
 

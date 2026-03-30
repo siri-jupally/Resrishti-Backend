@@ -68,6 +68,8 @@ const loginManager = async (req, res) => {
         _id: manager._id,
         email: manager.email,
         token: generateToken(manager._id),
+        isFirstLogin: manager.isFirstLogin,
+        isProfileComplete: manager.isProfileComplete,
       });
     }
     res.status(400).json({ message: "Invalid credentials" });
@@ -78,7 +80,7 @@ const loginManager = async (req, res) => {
 
 // POST /api/manager/employees - create employee under manager
 const createEmployee = async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, jobRole, department, joiningDate } = req.body;
   try {
     const exists = await Employee.findOne({ email });
     if (exists)
@@ -88,10 +90,13 @@ const createEmployee = async (req, res) => {
       email,
       password,
       manager: req.manager._id,
+      jobRole: jobRole || undefined,
+      department: department || undefined,
+      joiningDate: joiningDate || undefined,
     });
     res
       .status(201)
-      .json({ _id: employee._id, email: employee.email, name: employee.name });
+      .json({ _id: employee._id, email: employee.email, name: employee.name, jobRole: employee.jobRole, department: employee.department, joiningDate: employee.joiningDate });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

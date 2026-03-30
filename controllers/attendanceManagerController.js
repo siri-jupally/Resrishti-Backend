@@ -16,6 +16,7 @@ const Attendance = require("../models/Attendance");
 const CorrectionRequest = require("../models/CorrectionRequest");
 const Leave = require("../models/Leave");
 const Employee = require("../models/Employee");
+const Admin = require("../models/Admin");
 const { sendPush } = require("../utils/push");
 
 // GET /api/manager/attendance/team?date=YYYY-MM-DD
@@ -380,6 +381,23 @@ const reviewLeave = async (req, res) => {
             } catch (pushErr) {
                 console.error("Push error:", pushErr);
             }
+        }
+
+        // Notify all admins of the leave decision
+        try {
+            const admins = await Admin.find().select("pushSubscription");
+            for (const admin of admins) {
+                if (admin.pushSubscription) {
+                    await sendPush(admin.pushSubscription, {
+                        title: `Leave ${status === "approved" ? "Approved" : "Rejected"} by Manager`,
+                        body: `${leave.employee.name}'s ${leave.type} leave (${leave.startDate} to ${leave.endDate}) was ${status}`,
+                        icon: "/android-chrome-512x512.png",
+                        data: { url: "/admin/dashboard?tab=leaves" },
+                    });
+                }
+            }
+        } catch (adminPushErr) {
+            console.error("Admin push error:", adminPushErr);
         }
 
         res.json(leave);

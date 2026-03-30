@@ -12,7 +12,8 @@ const adminSchema = new mongoose.Schema({
     password: {
         type: String,
         required: true
-    }
+    },
+    pushSubscription: { type: Object }
 });
 
 // Hash password before saving

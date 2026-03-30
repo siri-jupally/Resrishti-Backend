@@ -36,7 +36,17 @@ const {
   getLeaveRequests,
   reviewLeave,
 } = require("../controllers/attendanceManagerController");
+const selfAttendance = require("../controllers/managerSelfAttendanceController");
 const { subscribe } = require("../controllers/notificationController");
+const {
+  managerChangePassword,
+  getManagerProfile,
+  updateManagerProfile,
+  getEmployeeProfileByManager,
+  updateEmployeeProfileByManager,
+  upload: profileUpload,
+} = require("../controllers/profileController");
+const { managerBatchLocations, getEmployeeTrail } = require("../controllers/locationController");
 const { protectManager } = require("../middleware/authManager");
 const { getIo } = require("../socketHandler");
 
@@ -68,6 +78,31 @@ router.patch("/attendance/corrections/:id", protectManager, reviewCorrection);
 // Leave routes
 router.get("/leaves", protectManager, getLeaveRequests);
 router.patch("/leaves/:id", protectManager, reviewLeave);
+
+// Manager self-attendance routes
+router.post("/self-attendance/checkin", protectManager, selfAttendance.checkIn);
+router.post("/self-attendance/checkout", protectManager, selfAttendance.checkOut);
+router.get("/self-attendance/today", protectManager, selfAttendance.getToday);
+router.get("/self-attendance/calendar", protectManager, selfAttendance.getCalendar);
+router.post("/self-attendance/correction", protectManager, selfAttendance.submitCorrection);
+router.get("/self-attendance/corrections", protectManager, selfAttendance.getCorrections);
+router.get("/self-attendance/leaves", protectManager, selfAttendance.getLeaves);
+router.post("/self-attendance/leaves", protectManager, selfAttendance.applyLeave);
+router.get("/self-attendance/policy", protectManager, selfAttendance.getPolicy);
+
+// Profile routes
+router.post("/profile/change-password", protectManager, managerChangePassword);
+router.get("/profile", protectManager, getManagerProfile);
+router.put("/profile", protectManager, profileUpload.fields([
+  { name: "profilePhoto", maxCount: 1 },
+  { name: "idProofDocument", maxCount: 1 },
+]), updateManagerProfile);
+router.get("/employees/:id/profile", protectManager, getEmployeeProfileByManager);
+router.patch("/employees/:id/profile", protectManager, updateEmployeeProfileByManager);
+
+// Location tracking
+router.post("/location/batch", protectManager, managerBatchLocations);
+router.get("/location/trail/:employeeId/:date", protectManager, getEmployeeTrail);
 
 router.post("/subscribe", protectManager, subscribe);
 

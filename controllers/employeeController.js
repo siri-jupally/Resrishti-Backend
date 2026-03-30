@@ -40,6 +40,8 @@ const loginEmployee = async (req, res) => {
                 _id: employee._id,
                 email: employee.email,
                 token: generateToken(employee._id),
+                isFirstLogin: employee.isFirstLogin,
+                isProfileComplete: employee.isProfileComplete,
             });
         }
         res.status(400).json({ message: "Invalid credentials" });

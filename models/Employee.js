@@ -34,7 +34,7 @@ const employeeSchema = new mongoose.Schema(
       ref: "Manager",
       required: true,
     },
-    pushSubscription: { type: Object }, // Store the VAPID subscription object
+    pushSubscription: { type: Object },
     homeLocation: {
       lat: { type: Number },
       lng: { type: Number },
@@ -44,6 +44,26 @@ const employeeSchema = new mongoose.Schema(
       enum: ["WFO", "WFH", "remote"],
       default: "WFO",
     },
+
+    // Profile fields
+    isFirstLogin: { type: Boolean, default: true },
+    isProfileComplete: { type: Boolean, default: false },
+    profilePhoto: { type: String }, // S3 key or URL
+    dateOfBirth: { type: String },
+    gender: { type: String, enum: ["male", "female", "other", ""] },
+    phone: { type: String },
+    personalEmail: { type: String },
+    emergencyContactName: { type: String },
+    emergencyContactPhone: { type: String },
+    currentAddress: { type: String },
+    idProofType: { type: String, enum: ["aadhaar", "pan", "passport", ""] },
+    idProofNumber: { type: String },
+    idProofDocument: { type: String }, // S3 key or URL
+
+    // Job fields (set by manager at creation, read-only for employee)
+    jobRole: { type: String },
+    department: { type: String },
+    joiningDate: { type: String },
   },
   { timestamps: true }
 );

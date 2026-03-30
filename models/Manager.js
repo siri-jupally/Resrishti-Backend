@@ -30,8 +30,28 @@ const managerSchema = new mongoose.Schema(
       trim: true,
     },
     password: { type: String, required: true },
-    pushSubscription: { type: Object }, // Store the VAPID subscription object
+    pushSubscription: { type: Object },
     role: { type: String, default: "manager" },
+
+    // Profile fields
+    isFirstLogin: { type: Boolean, default: true },
+    isProfileComplete: { type: Boolean, default: false },
+    profilePhoto: { type: String },
+    dateOfBirth: { type: String },
+    gender: { type: String, enum: ["male", "female", "other", ""] },
+    phone: { type: String },
+    personalEmail: { type: String },
+    emergencyContactName: { type: String },
+    emergencyContactPhone: { type: String },
+    currentAddress: { type: String },
+    idProofType: { type: String, enum: ["aadhaar", "pan", "passport", ""] },
+    idProofNumber: { type: String },
+    idProofDocument: { type: String },
+
+    // Job fields (set by admin at creation, read-only for manager)
+    jobRole: { type: String },
+    department: { type: String },
+    joiningDate: { type: String },
   },
   { timestamps: true }
 );

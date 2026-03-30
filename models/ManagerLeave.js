@@ -1,17 +1,10 @@
-/*
-  Leave model
-
-  Purpose:
-  - Stores employee leave requests with type, date range, and approval status.
-  - Integrates with Attendance to mark leave days automatically upon approval.
-*/
 const mongoose = require("mongoose");
 
-const leaveSchema = new mongoose.Schema(
+const managerLeaveSchema = new mongoose.Schema(
     {
-        employee: {
+        manager: {
             type: mongoose.Schema.Types.ObjectId,
-            ref: "Employee",
+            ref: "Manager",
             required: true,
         },
         type: {
@@ -29,21 +22,15 @@ const leaveSchema = new mongoose.Schema(
         },
         reviewedBy: {
             type: mongoose.Schema.Types.ObjectId,
-            ref: "Manager",
-        },
-        reviewRemarks: { type: String },
-        adminOverride: { type: Boolean, default: false },
-        adminReviewedBy: {
-            type: mongoose.Schema.Types.ObjectId,
             ref: "Admin",
         },
-        adminRemarks: { type: String },
+        reviewRemarks: { type: String },
     },
     { timestamps: true }
 );
 
-leaveSchema.index({ employee: 1, status: 1 });
-leaveSchema.index({ employee: 1, startDate: 1 });
-leaveSchema.index({ status: 1 });
+managerLeaveSchema.index({ manager: 1, status: 1 });
+managerLeaveSchema.index({ manager: 1, startDate: 1 });
+managerLeaveSchema.index({ status: 1 });
 
-module.exports = mongoose.model("Leave", leaveSchema);
+module.exports = mongoose.model("ManagerLeave", managerLeaveSchema);
