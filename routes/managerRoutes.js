@@ -25,7 +25,9 @@ const {
   uploadAttachmentAndPostMessageAsManager,
   deleteEmployee,
   updateEmployee,
+  deleteTask,
 } = require("../controllers/managerController");
+const { getTaskPolicy } = require("../controllers/taskPolicyController");
 const {
   getTeamAttendance,
   getTeamSummary,
@@ -58,6 +60,8 @@ router.delete("/employees/:id", protectManager, deleteEmployee);
 router.patch("/employees/:id", protectManager, updateEmployee);
 router.post("/tasks", protectManager, createTask);
 router.get("/tasks", protectManager, listTasks);
+router.delete("/tasks/:id", protectManager, deleteTask);
+router.get("/task-policy", protectManager, getTaskPolicy);
 
 // Threaded messages
 router.post("/tasks/:id/messages", protectManager, postMessageToTaskAsManager);

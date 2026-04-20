@@ -178,7 +178,7 @@ const getAllLeaveRequests = async (req, res) => {
             .sort({ createdAt: -1 });
 
         // Enrich with manager info for each leave
-        const employeeIds = [...new Set(leaves.map((l) => String(l.employee?._id)))];
+        const employeeIds = [...new Set(leaves.filter((l) => l.employee?._id).map((l) => String(l.employee._id)))];
         const employees = await Employee.find({ _id: { $in: employeeIds } })
             .select("manager")
             .populate("manager", "name email");

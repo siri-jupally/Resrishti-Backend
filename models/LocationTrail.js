@@ -23,8 +23,14 @@ const locationTrailSchema = new mongoose.Schema({
     checkOutTime: Date,
 }, { timestamps: true });
 
-locationTrailSchema.index({ employee: 1, date: 1 }, { unique: true, sparse: true });
-locationTrailSchema.index({ manager: 1, date: 1 }, { unique: true, sparse: true });
+locationTrailSchema.index(
+    { employee: 1, date: 1 },
+    { unique: true, partialFilterExpression: { employee: { $exists: true, $ne: null } } }
+);
+locationTrailSchema.index(
+    { manager: 1, date: 1 },
+    { unique: true, partialFilterExpression: { manager: { $exists: true, $ne: null } } }
+);
 locationTrailSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 86400 }); // 90-day TTL
 
 module.exports = mongoose.model("LocationTrail", locationTrailSchema);

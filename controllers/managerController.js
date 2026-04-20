@@ -409,6 +409,31 @@ const uploadAttachmentAndPostMessageAsManager = [
   },
 ];
 
+// DELETE /api/manager/tasks/:id
+const TaskPolicy = require("../models/TaskPolicy");
+
+const deleteTask = async (req, res) => {
+  try {
+    // Check if admin has enabled task deletion for managers
+    const policy = await TaskPolicy.findOne();
+    if (!policy || !policy.allowManagerTaskDeletion) {
+      return res.status(403).json({
+        message: "Task deletion is not enabled. Please contact your admin.",
+      });
+    }
+
+    const task = await Task.findById(req.params.id);
+    if (!task) return res.status(404).json({ message: "Task not found" });
+    if (String(task.manager) !== String(req.manager._id))
+      return res.status(403).json({ message: "Not authorized" });
+
+    await Task.findByIdAndDelete(req.params.id);
+    res.json({ message: "Task deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   loginManager,
   createEmployee,
@@ -419,4 +444,5 @@ module.exports = {
   uploadAttachmentAndPostMessageAsManager,
   deleteEmployee,
   updateEmployee,
+  deleteTask,
 };

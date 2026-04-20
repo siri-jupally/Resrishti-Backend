@@ -41,6 +41,7 @@ const {
     updateManagerProfileByAdmin,
 } = require('../controllers/profileController');
 const { getEmployeeTrailByAdmin, getManagerTrailByAdmin } = require('../controllers/locationController');
+const { getTaskPolicy, updateTaskPolicy } = require('../controllers/taskPolicyController');
 const { protect } = require('../middleware/authMiddleware');
 
 router.post('/login', loginAdmin);
@@ -93,6 +94,10 @@ router.get('/employees/:id/profile', protect, getEmployeeProfileByAdmin);
 router.patch('/employees/:id/profile', protect, updateEmployeeProfileByAdmin);
 router.get('/managers/:id/profile', protect, getManagerProfileByAdmin);
 router.patch('/managers/:id/profile', protect, updateManagerProfileByAdmin);
+
+// Task policy
+router.get('/task-policy', protect, getTaskPolicy);
+router.put('/task-policy', protect, updateTaskPolicy);
 
 // Location trail viewing
 router.get('/location/trail/employee/:employeeId/:date', protect, getEmployeeTrailByAdmin);
