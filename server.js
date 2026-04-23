@@ -52,7 +52,27 @@ app.use(limiter);
 // Database Connection
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDB Connected"))
+  .then(async () => {
+    console.log("MongoDB Connected");
+    // Fix stale sparse indexes on LocationTrail (one-time migration)
+    try {
+      const col = mongoose.connection.collection("locationtrails");
+      const indexes = await col.indexes();
+      for (const idx of indexes) {
+        if (
+          idx.sparse === true &&
+          idx.unique === true &&
+          (idx.key?.employee || idx.key?.manager)
+        ) {
+          await col.dropIndex(idx.name);
+          console.log(`Dropped stale index: ${idx.name}`);
+        }
+      }
+    } catch (e) {
+      // Collection may not exist yet — that's fine
+      if (e.codeName !== "NamespaceNotFound") console.error("Index migration:", e.message);
+    }
+  })
   .catch((err) => console.error("MongoDB Connection Error:", err));
 
 // Routes
