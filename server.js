@@ -72,6 +72,21 @@ mongoose
       // Collection may not exist yet — that's fine
       if (e.codeName !== "NamespaceNotFound") console.error("Index migration:", e.message);
     }
+
+    // Backfill missing allowMultipleCheckIns field on legacy AttendancePolicy docs.
+    // Mongoose schema defaults only apply on insert, not to existing docs that lack the field.
+    try {
+      const policies = mongoose.connection.collection("attendancepolicies");
+      const result = await policies.updateMany(
+        { allowMultipleCheckIns: { $exists: false } },
+        { $set: { allowMultipleCheckIns: false } }
+      );
+      if (result.modifiedCount > 0) {
+        console.log(`Backfilled allowMultipleCheckIns on ${result.modifiedCount} policy doc(s)`);
+      }
+    } catch (e) {
+      if (e.codeName !== "NamespaceNotFound") console.error("Policy backfill:", e.message);
+    }
   })
   .catch((err) => console.error("MongoDB Connection Error:", err));
 

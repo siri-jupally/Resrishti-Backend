@@ -44,6 +44,7 @@ const attendancePolicySchema = new mongoose.Schema(
         checkOutMinTime: { type: String, default: "17:00" },
         wfhEnabled: { type: Boolean, default: true },
         maxWfhDaysPerMonth: { type: Number, default: 8 },
+        allowMultipleCheckIns: { type: Boolean, default: false },
         leaveQuotas: {
             casual: { type: Number, default: 12 },
             sick: { type: Number, default: 12 },

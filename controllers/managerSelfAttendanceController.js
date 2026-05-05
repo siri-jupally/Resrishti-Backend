@@ -64,12 +64,27 @@ const checkIn = async (req, res) => {
         const managerId = req.manager._id;
         const today = getTodayStr();
 
+        const policy = await AttendancePolicy.findOne();
+        const allowMultiple = policy?.allowMultipleCheckIns === true;
+        console.log("[ManagerCheckIn] allowMultiple:", allowMultiple, "policy.allowMultipleCheckIns:", policy?.allowMultipleCheckIns);
+
         const existing = await ManagerAttendance.findOne({ manager: managerId, date: today });
         if (existing && existing.checkIn && existing.checkIn.time) {
-            return res.status(400).json({ message: "Already checked in today" });
+            console.log("[ManagerCheckIn] Existing record found. checkIn:", !!existing.checkIn?.time, "checkOut:", !!existing.checkOut?.time, "sessions:", existing.sessions?.length || 0);
+            if (!allowMultiple) {
+                console.log("[ManagerCheckIn] Blocking: multiple check-ins not allowed");
+                return res.status(400).json({ message: "Already checked in today" });
+            }
+            const sessionsArr = existing.sessions || [];
+            const lastSession = sessionsArr[sessionsArr.length - 1];
+            const lastSessionOpen = lastSession && lastSession.checkIn?.time && !lastSession.checkOut?.time;
+            // Legacy "open" only applies when no sessions array entries exist yet
+            const legacyOpen = sessionsArr.length === 0 && existing.checkIn?.time && !existing.checkOut?.time;
+            console.log("[ManagerCheckIn] lastSessionOpen:", lastSessionOpen, "legacyOpen:", legacyOpen);
+            if (lastSessionOpen || legacyOpen) {
+                return res.status(400).json({ message: "Please check out from your current session first" });
+            }
         }
-
-        const policy = await AttendancePolicy.findOne();
         let locationWithinBoundary = null;
         let isLateCheckIn = false;
 
@@ -100,12 +115,46 @@ const checkIn = async (req, res) => {
         }
 
         const effectiveWorkMode = workMode || "WFO";
+        const now = new Date();
+        const newCheckIn = {
+            time: now,
+            location: lat !== undefined ? { lat, lng, address } : undefined,
+        };
 
         if (existing) {
-            existing.checkIn = {
-                time: new Date(),
-                location: lat !== undefined ? { lat, lng, address } : undefined,
-            };
+            const sessionsArr = existing.sessions || [];
+            const lastSessionClosed =
+                sessionsArr.length > 0 &&
+                !!sessionsArr[sessionsArr.length - 1].checkIn?.time &&
+                !!sessionsArr[sessionsArr.length - 1].checkOut?.time;
+            const legacyClosed =
+                sessionsArr.length === 0 &&
+                !!existing.checkIn?.time &&
+                !!existing.checkOut?.time;
+            const isAdditionalSession = allowMultiple && (legacyClosed || lastSessionClosed);
+            console.log("[ManagerCheckIn] isAdditionalSession:", isAdditionalSession, "lastSessionClosed:", lastSessionClosed, "legacyClosed:", legacyClosed);
+
+            if (isAdditionalSession) {
+                // Backfill the legacy first-session into the array if it's empty
+                if (sessionsArr.length === 0) {
+                    const ci = existing.checkIn?.toObject ? existing.checkIn.toObject() : existing.checkIn;
+                    const co = existing.checkOut?.toObject ? existing.checkOut.toObject() : existing.checkOut;
+                    existing.sessions.push({ checkIn: ci, checkOut: co });
+                }
+                existing.sessions.push({ checkIn: newCheckIn });
+                // NOTE: we intentionally do NOT clear existing.checkOut here.
+                // The sessions array is the source of truth for "is the day open".
+                // The legacy checkOut field stays as the latest checkout time and gets updated
+                // by the next checkOut call.
+                existing.workMode = effectiveWorkMode;
+                existing.status = "present";
+                if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
+                await existing.save();
+                console.log("[ManagerCheckIn] Saved additional session. Total sessions:", existing.sessions.length);
+                return res.status(200).json(existing);
+            }
+
+            existing.checkIn = newCheckIn;
             existing.workMode = effectiveWorkMode;
             existing.status = "present";
             existing.approvalStatus = locationWithinBoundary === false ? "pending" : "auto-approved";
@@ -119,10 +168,7 @@ const checkIn = async (req, res) => {
         const attendance = await ManagerAttendance.create({
             manager: managerId,
             date: today,
-            checkIn: {
-                time: new Date(),
-                location: lat !== undefined ? { lat, lng, address } : undefined,
-            },
+            checkIn: newCheckIn,
             workMode: effectiveWorkMode,
             status: "present",
             approvalStatus: locationWithinBoundary === false ? "pending" : "auto-approved",
@@ -158,19 +204,39 @@ const checkOut = async (req, res) => {
         if (!attendance || !attendance.checkIn || !attendance.checkIn.time) {
             return res.status(400).json({ message: "No check-in found for today" });
         }
-        if (attendance.checkOut && attendance.checkOut.time) {
-            return res.status(400).json({ message: "Already checked out today" });
+
+        // Find the most recent open session
+        const lastSession = attendance.sessions?.[attendance.sessions.length - 1];
+        const lastSessionOpen = lastSession && lastSession.checkIn?.time && !lastSession.checkOut?.time;
+        const legacyOpen = attendance.checkIn?.time && !attendance.checkOut?.time && (!attendance.sessions || attendance.sessions.length === 0);
+
+        if (!lastSessionOpen && !legacyOpen) {
+            return res.status(400).json({ message: "No active session to check out from" });
         }
 
         const now = new Date();
-        attendance.checkOut = {
+        const checkOutPayload = {
             time: now,
             location: lat !== undefined ? { lat, lng, address } : undefined,
         };
 
-        const checkInTime = new Date(attendance.checkIn.time);
-        const diffMs = now - checkInTime;
-        attendance.workingHours = Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
+        if (lastSessionOpen) {
+            attendance.sessions[attendance.sessions.length - 1].checkOut = checkOutPayload;
+        }
+        attendance.checkOut = checkOutPayload;
+
+        // Recalculate total working hours: sum of all completed sessions, or fall back to legacy single span
+        let totalMs = 0;
+        if (attendance.sessions && attendance.sessions.length > 0) {
+            for (const s of attendance.sessions) {
+                if (s.checkIn?.time && s.checkOut?.time) {
+                    totalMs += new Date(s.checkOut.time) - new Date(s.checkIn.time);
+                }
+            }
+        } else {
+            totalMs = now - new Date(attendance.checkIn.time);
+        }
+        attendance.workingHours = Math.round((totalMs / (1000 * 60 * 60)) * 100) / 100;
 
         const policy = await AttendancePolicy.findOne();
         if (policy && policy.checkOutMinTime) {

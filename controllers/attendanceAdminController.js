@@ -42,6 +42,7 @@ const updatePolicy = async (req, res) => {
             wfhEnabled,
             maxWfhDaysPerMonth,
             leaveQuotas,
+            allowMultipleCheckIns,
         } = req.body;
 
         let policy = await AttendancePolicy.findOne();
@@ -60,6 +61,7 @@ const updatePolicy = async (req, res) => {
         if (wfhEnabled !== undefined) policy.wfhEnabled = wfhEnabled;
         if (maxWfhDaysPerMonth !== undefined) policy.maxWfhDaysPerMonth = maxWfhDaysPerMonth;
         if (leaveQuotas !== undefined) policy.leaveQuotas = leaveQuotas;
+        if (allowMultipleCheckIns !== undefined) policy.allowMultipleCheckIns = allowMultipleCheckIns;
 
         await policy.save();
         res.json(policy);

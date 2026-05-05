@@ -28,6 +28,21 @@ const managerAttendanceSchema = new mongoose.Schema(
             time: { type: Date },
             location: locationSchema,
         },
+        // Multiple check-in/out pairs (used when policy.allowMultipleCheckIns is true).
+        // Mirrors checkIn/checkOut for the first/last entry so existing reports keep working.
+        sessions: [
+            {
+                checkIn: {
+                    time: { type: Date },
+                    location: locationSchema,
+                },
+                checkOut: {
+                    time: { type: Date },
+                    location: locationSchema,
+                },
+                _id: false,
+            },
+        ],
         workMode: {
             type: String,
             enum: ["WFO", "WFH", "remote"],
