@@ -333,20 +333,23 @@ const submitCorrection = async (req, res) => {
             return res.status(403).json({ message: "Not authorized" });
         }
 
-        // Convert HH:MM time strings to full Date objects using the attendance date
-        let parsedCheckIn, parsedCheckOut;
-        if (requestedCheckIn && requestedCheckIn.includes(":")) {
-            const [h, m] = requestedCheckIn.split(":").map(Number);
-            const d = new Date(attendance.date + "T00:00:00");
-            d.setHours(h, m, 0, 0);
-            parsedCheckIn = d;
-        }
-        if (requestedCheckOut && requestedCheckOut.includes(":")) {
-            const [h, m] = requestedCheckOut.split(":").map(Number);
-            const d = new Date(attendance.date + "T00:00:00");
-            d.setHours(h, m, 0, 0);
-            parsedCheckOut = d;
-        }
+        // Parse the requested times. The frontend now sends a full ISO timestamp built
+        // from the attendance date + picked HH:MM in the user's local timezone, so the
+        // instant is unambiguous. A bare "HH:MM" string is still accepted as a fallback
+        // (interpreted on the attendance date in the server's local timezone).
+        const parseTimeValue = (val) => {
+            if (!val) return undefined;
+            if (typeof val === "string" && /^\d{1,2}:\d{2}(:\d{2})?$/.test(val)) {
+                const [h, m] = val.split(":").map(Number);
+                const d = new Date(attendance.date + "T00:00:00");
+                d.setHours(h, m, 0, 0);
+                return d;
+            }
+            const d = new Date(val);
+            return isNaN(d.getTime()) ? undefined : d;
+        };
+        const parsedCheckIn = parseTimeValue(requestedCheckIn);
+        const parsedCheckOut = parseTimeValue(requestedCheckOut);
 
         const correction = await CorrectionRequest.create({
             employee: req.employee._id,
