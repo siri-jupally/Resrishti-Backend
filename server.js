@@ -21,6 +21,8 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
+const { ipKeyGenerator } = require("express-rate-limit");
+const jwt = require("jsonwebtoken");
 const dotenv = require("dotenv");
 
 dotenv.config();
@@ -34,6 +36,11 @@ const { initSocket } = require("./socketHandler");
 const server = http.createServer(app);
 const io = initSocket(server);
 
+// Trust the reverse proxy (Render/Heroku/Nginx/Cloudflare/etc.) so req.ip resolves
+// to the real client IP via X-Forwarded-For. Without this, every request appears
+// to come from the proxy IP and ALL users share a single rate-limit bucket.
+app.set("trust proxy", 1);
+
 // Middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -43,11 +50,63 @@ app.use(express.json());
 app.use("/uploads", express.static("uploads"));
 
 // Rate Limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // limit each IP to 100 requests per windowMs
+//
+// Two-tier strategy:
+//   1. apiLimiter   — generous per-IP limit on /api/* to absorb normal app traffic
+//                     (login + checkin + polling + location batch + profile loads).
+//                     Authenticated requests are keyed by user id so multiple users
+//                     behind the same office NAT don't share a bucket.
+//   2. loginLimiter — strict per-IP+identifier limit on the three /login endpoints,
+//                     which is where brute-force protection actually matters.
+//
+// Static /uploads and non-API routes are intentionally NOT rate-limited.
+const ipKey = (req) => {
+  // Prefer the real client IP. ipv6Subnet groups IPv6 addresses to /56 to avoid
+  // a single client cycling through addresses and trivially bypassing limits.
+  return ipKeyGenerator(req.ip);
+};
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute window
+  limit: 300, // 300 req/min/user (or /IP for unauthenticated) — well above normal usage
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  // Skip CORS preflight so browsers don't burn quota before the real call.
+  skip: (req) => req.method === "OPTIONS",
+  // Key by user id when authenticated; fall back to client IP otherwise.
+  keyGenerator: (req) => {
+    const auth = req.headers.authorization;
+    if (auth && auth.startsWith("Bearer ")) {
+      try {
+        const payload = jwt.decode(auth.slice(7));
+        if (payload && payload.id) return `u:${payload.id}`;
+      } catch (e) {
+        // fall through to IP
+      }
+    }
+    return `ip:${ipKey(req)}`;
+  },
+  message: { message: "High traffic right now. Please try again in a moment." },
 });
-app.use(limiter);
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  limit: 30, // 30 login attempts per 15 min per IP+email — protects against brute force
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // successful logins don't count toward the limit
+  keyGenerator: (req) => {
+    const email = (req.body && (req.body.email || req.body.username)) || "";
+    return `login:${ipKey(req)}:${String(email).toLowerCase()}`;
+  },
+  message: { message: "Too many login attempts from this device. Please wait a few minutes and try again." },
+});
+
+app.use("/api", apiLimiter);
+app.post(
+  ["/api/employee/login", "/api/manager/login", "/api/admin/login"],
+  loginLimiter
+);
 
 // Database Connection
 mongoose
