@@ -178,7 +178,7 @@ const checkIn = async (req, res) => {
         });
 
         if (locationWithinBoundary === false) {
-            await notifyAdmins("manager.outOfBoundary", {
+            await notifyAdmins("attendance", {
                 title: "Out-of-Boundary Check-in (Manager)",
                 body: `${req.manager.name} checked in from outside the designated area`,
                 icon: "/android-chrome-512x512.png",
@@ -355,7 +355,7 @@ const submitCorrection = async (req, res) => {
             reason,
         });
 
-        await notifyAdmins("manager.correctionRequest", {
+        await notifyAdmins("attendance", {
             title: "Attendance Correction Request (Manager)",
             body: `${req.manager.name} submitted a correction for ${attendance.date}`,
             icon: "/android-chrome-512x512.png",
@@ -434,7 +434,7 @@ const applyLeave = async (req, res) => {
             reason,
         });
 
-        await notifyAdmins("manager.leaveRequest", {
+        await notifyAdmins("attendance", {
             title: "Manager Leave Request",
             body: `${req.manager.name} applied for ${type} leave (${startDate} to ${endDate})`,
             icon: "/android-chrome-512x512.png",

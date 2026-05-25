@@ -273,7 +273,7 @@ Open your dashboard: ${dashboardUrl}`;
             url: `/employee/dashboard?taskId=${task._id}` // Open dashboard with specific task
           }
         };
-        await notifyIfEnabled("task.assigned", employee.pushSubscription, pushPayload);
+        await notifyIfEnabled("task", employee.pushSubscription, pushPayload);
       }
 
       res.status(201).json(task);
@@ -336,7 +336,7 @@ const postMessageToTaskAsManager = async (req, res) => {
         // We only populated 'name email' above, so we must fetch pushSubscription now.
         const empParams = await Employee.findById(task.employee._id).select("pushSubscription");
         if (empParams && empParams.pushSubscription) {
-          await notifyIfEnabled("task.messageFromManager", empParams.pushSubscription, {
+          await notifyIfEnabled("task", empParams.pushSubscription, {
             title: "New Message from Manager",
             body: `${trimmed.substring(0, 50)}${trimmed.length > 50 ? "..." : ""}`,
             icon: "/android-chrome-512x512.png", // Corrected Icon

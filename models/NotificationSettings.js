@@ -1,40 +1,12 @@
 const mongoose = require("mongoose");
 
-const NOTIFICATION_TYPES = [
-    // Task
-    "task.assigned",
-    "task.statusUpdated",
-    "task.comment",
-    "task.messageFromManager",
-    "task.messageFromEmployee",
-    "task.attachmentFromEmployee",
-
-    // Attendance (Employee)
-    "attendance.outOfBoundary",
-    "attendance.approval",
-    "attendance.correctionRequest",
-    "attendance.correctionApproval",
-    "attendance.workModeUpdate",
-
-    // Leaves (Employee)
-    "leave.requestToManager",
-    "leave.requestToAdmin",
-    "leave.approvalByManager",
-    "leave.approvalNotifyAdmin",
-    "leave.approvalByAdmin",
-
-    // Manager-level
-    "manager.outOfBoundary",
-    "manager.correctionRequest",
-    "manager.leaveRequest",
-    "manager.attendanceApproval",
-    "manager.correctionApproval",
-    "manager.leaveApproval",
-];
+// Only two notification groups. Each gates the entire push pipeline for
+// its category (push HTTPS call + any related fan-out work).
+const NOTIFICATION_GROUPS = ["task", "attendance"];
 
 const buildDefaultToggles = () => {
     const obj = {};
-    for (const t of NOTIFICATION_TYPES) obj[t] = true;
+    for (const g of NOTIFICATION_GROUPS) obj[g] = true;
     return obj;
 };
 
@@ -50,8 +22,8 @@ const notificationSettingsSchema = new mongoose.Schema(
     { timestamps: true, minimize: false }
 );
 
-notificationSettingsSchema.statics.NOTIFICATION_TYPES = NOTIFICATION_TYPES;
+notificationSettingsSchema.statics.NOTIFICATION_GROUPS = NOTIFICATION_GROUPS;
 notificationSettingsSchema.statics.buildDefaultToggles = buildDefaultToggles;
 
 module.exports = mongoose.model("NotificationSettings", notificationSettingsSchema);
-module.exports.NOTIFICATION_TYPES = NOTIFICATION_TYPES;
+module.exports.NOTIFICATION_GROUPS = NOTIFICATION_GROUPS;

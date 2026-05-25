@@ -136,7 +136,7 @@ const approveAttendance = async (req, res) => {
 
         if (attendance.manager.pushSubscription) {
             try {
-                await notifyIfEnabled("manager.attendanceApproval", attendance.manager.pushSubscription, {
+                await notifyIfEnabled("attendance", attendance.manager.pushSubscription, {
                     title: `Attendance ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your attendance for ${attendance.date} has been ${status}${remarks ? ": " + remarks : ""}`,
                     icon: "/android-chrome-512x512.png",
@@ -219,7 +219,7 @@ const reviewCorrection = async (req, res) => {
 
         if (correction.manager.pushSubscription) {
             try {
-                await notifyIfEnabled("manager.correctionApproval", correction.manager.pushSubscription, {
+                await notifyIfEnabled("attendance", correction.manager.pushSubscription, {
                     title: `Correction ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your correction for ${correction.date} has been ${status}`,
                     icon: "/android-chrome-512x512.png",
@@ -295,7 +295,7 @@ const reviewLeave = async (req, res) => {
 
         if (leave.manager.pushSubscription) {
             try {
-                await notifyIfEnabled("manager.leaveApproval", leave.manager.pushSubscription, {
+                await notifyIfEnabled("attendance", leave.manager.pushSubscription, {
                     title: `Leave ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your ${leave.type} leave (${leave.startDate} to ${leave.endDate}) has been ${status}`,
                     icon: "/android-chrome-512x512.png",

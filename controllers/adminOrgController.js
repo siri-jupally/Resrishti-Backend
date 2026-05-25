@@ -257,7 +257,7 @@ const adminReviewLeave = async (req, res) => {
         // Notify employee
         if (leave.employee.pushSubscription) {
             try {
-                await notifyIfEnabled("leave.approvalByAdmin", leave.employee.pushSubscription, {
+                await notifyIfEnabled("attendance", leave.employee.pushSubscription, {
                     title: `Leave ${status === "approved" ? "Approved" : "Rejected"} by Admin`,
                     body: `Your ${leave.type} leave (${leave.startDate} to ${leave.endDate}) has been ${status} by admin${reviewRemarks ? ": " + reviewRemarks : ""}`,
                     icon: "/android-chrome-512x512.png",

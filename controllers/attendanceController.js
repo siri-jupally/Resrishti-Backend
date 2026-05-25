@@ -173,7 +173,7 @@ const checkIn = async (req, res) => {
             try {
                 const manager = await Manager.findById(req.employee.manager).select("pushSubscription");
                 if (manager && manager.pushSubscription) {
-                    await notifyIfEnabled("attendance.outOfBoundary", manager.pushSubscription, {
+                    await notifyIfEnabled("attendance", manager.pushSubscription, {
                         title: "⚠️ Out-of-Boundary Check-in",
                         body: `${req.employee.name} checked in from outside the designated area`,
                         icon: "/android-chrome-512x512.png",
@@ -364,7 +364,7 @@ const submitCorrection = async (req, res) => {
         try {
             const manager = await Manager.findById(req.employee.manager).select("pushSubscription");
             if (manager && manager.pushSubscription) {
-                await notifyIfEnabled("attendance.correctionRequest", manager.pushSubscription, {
+                await notifyIfEnabled("attendance", manager.pushSubscription, {
                     title: "Attendance Correction Request",
                     body: `${req.employee.name} submitted a correction for ${attendance.date}`,
                     icon: "/android-chrome-512x512.png",
@@ -452,7 +452,7 @@ const applyLeave = async (req, res) => {
         try {
             const manager = await Manager.findById(req.employee.manager).select("pushSubscription");
             if (manager && manager.pushSubscription) {
-                await notifyIfEnabled("leave.requestToManager", manager.pushSubscription, {
+                await notifyIfEnabled("attendance", manager.pushSubscription, {
                     title: "Leave Request",
                     body: `${req.employee.name} applied for ${type} leave (${startDate} to ${endDate})`,
                     icon: "/android-chrome-512x512.png",
@@ -468,7 +468,7 @@ const applyLeave = async (req, res) => {
             const admins = await Admin.find().select("pushSubscription");
             for (const admin of admins) {
                 if (admin.pushSubscription) {
-                    await notifyIfEnabled("leave.requestToAdmin", admin.pushSubscription, {
+                    await notifyIfEnabled("attendance", admin.pushSubscription, {
                         title: "New Leave Request",
                         body: `${req.employee.name} applied for ${type} leave (${startDate} to ${endDate})`,
                         icon: "/android-chrome-512x512.png",

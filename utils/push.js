@@ -1,6 +1,5 @@
 const webpush = require("web-push");
 const NotificationSettings = require("../models/NotificationSettings");
-const NotificationLog = require("../models/NotificationLog");
 
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
     webpush.setVapidDetails(
@@ -58,49 +57,36 @@ function invalidateSettingsCache() {
     cachedAt = 0;
 }
 
-function isEnabled(settings, type) {
+function isEnabled(settings, group) {
     if (!settings) return true;
     const togglesMap = settings.toggles;
     if (!togglesMap) return true;
     const val =
         typeof togglesMap.get === "function"
-            ? togglesMap.get(type)
-            : togglesMap[type];
+            ? togglesMap.get(group)
+            : togglesMap[group];
     return val !== false;
 }
 
-function dayKey(d = new Date()) {
-    return d.toISOString().slice(0, 10);
-}
-
-async function logEvent(type, field) {
-    try {
-        await NotificationLog.updateOne(
-            { type, day: dayKey() },
-            { $inc: { [field]: 1 }, $set: { lastAt: new Date() } },
-            { upsert: true }
-        );
-    } catch (err) {
-        // Counters are best-effort; never block.
-        console.error("notification log error:", err);
-    }
+/**
+ * Lightweight check exposed for callers that want to early-exit
+ * BEFORE doing expensive recipient lookups. Returns true if the group
+ * is enabled (or unknown - we default to enabled).
+ */
+async function isGroupEnabled(group) {
+    const settings = await getSettings();
+    return isEnabled(settings, group);
 }
 
 /**
- * Gated push: checks admin settings; if the type is disabled, the push is
- * skipped (counted as `skipped`). Otherwise sends and counts as `sent`.
- * Returns true if sent, false if skipped/no-op.
+ * Gated push: checks admin settings; if the group is disabled, the push
+ * is skipped silently. Returns true if sent, false if skipped/no-op.
+ * `group` must be one of: "task", "attendance".
  */
-async function notifyIfEnabled(type, subscription, payload) {
+async function notifyIfEnabled(group, subscription, payload) {
+    if (!subscription) return false;
     const settings = await getSettings();
-    if (!isEnabled(settings, type)) {
-        logEvent(type, "skipped");
-        return false;
-    }
-    if (!subscription) {
-        return false;
-    }
-    logEvent(type, "sent");
+    if (!isEnabled(settings, group)) return false;
     await sendPush(subscription, payload);
     return true;
 }
@@ -108,6 +94,7 @@ async function notifyIfEnabled(type, subscription, payload) {
 module.exports = {
     sendPush,
     notifyIfEnabled,
+    isGroupEnabled,
     getSettings,
     invalidateSettingsCache,
 };

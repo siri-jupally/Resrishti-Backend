@@ -45,7 +45,6 @@ const { getTaskPolicy, updateTaskPolicy } = require('../controllers/taskPolicyCo
 const {
     getSettings: getNotificationSettings,
     updateSettings: updateNotificationSettings,
-    getStats: getNotificationStats,
 } = require('../controllers/notificationSettingsController');
 const { protect } = require('../middleware/authMiddleware');
 
@@ -108,9 +107,8 @@ router.put('/task-policy', protect, updateTaskPolicy);
 router.get('/location/trail/employee/:employeeId/:date', protect, getEmployeeTrailByAdmin);
 router.get('/location/trail/manager/:managerId/:date', protect, getManagerTrailByAdmin);
 
-// Notification settings & stats
+// Notification settings
 router.get('/notification-settings', protect, getNotificationSettings);
 router.patch('/notification-settings', protect, updateNotificationSettings);
-router.get('/notification-stats', protect, getNotificationStats);
 
 module.exports = router;
