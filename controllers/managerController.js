@@ -31,7 +31,7 @@ const multer = require("multer");
 const { uploadTaskAttachment } = require("../utils/s3");
 const bcrypt = require("bcryptjs"); // Ensure bcrypt is available for password hashing
 const { getIo } = require("../socketHandler");
-const { sendPush } = require("../utils/push");
+const { sendPush, notifyIfEnabled } = require("../utils/push");
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -273,7 +273,7 @@ Open your dashboard: ${dashboardUrl}`;
             url: `/employee/dashboard?taskId=${task._id}` // Open dashboard with specific task
           }
         };
-        await sendPush(employee.pushSubscription, pushPayload);
+        await notifyIfEnabled("task.assigned", employee.pushSubscription, pushPayload);
       }
 
       res.status(201).json(task);
@@ -336,7 +336,7 @@ const postMessageToTaskAsManager = async (req, res) => {
         // We only populated 'name email' above, so we must fetch pushSubscription now.
         const empParams = await Employee.findById(task.employee._id).select("pushSubscription");
         if (empParams && empParams.pushSubscription) {
-          await sendPush(empParams.pushSubscription, {
+          await notifyIfEnabled("task.messageFromManager", empParams.pushSubscription, {
             title: "New Message from Manager",
             body: `${trimmed.substring(0, 50)}${trimmed.length > 50 ? "..." : ""}`,
             icon: "/android-chrome-512x512.png", // Corrected Icon

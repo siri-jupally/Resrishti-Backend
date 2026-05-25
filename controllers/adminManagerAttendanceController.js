@@ -17,7 +17,7 @@ const ManagerAttendance = require("../models/ManagerAttendance");
 const ManagerLeave = require("../models/ManagerLeave");
 const ManagerCorrectionRequest = require("../models/ManagerCorrectionRequest");
 const Manager = require("../models/Manager");
-const { sendPush } = require("../utils/push");
+const { sendPush, notifyIfEnabled } = require("../utils/push");
 
 // GET /api/admin/manager-attendance/team?date=YYYY-MM-DD
 const getManagersAttendance = async (req, res) => {
@@ -136,7 +136,7 @@ const approveAttendance = async (req, res) => {
 
         if (attendance.manager.pushSubscription) {
             try {
-                await sendPush(attendance.manager.pushSubscription, {
+                await notifyIfEnabled("manager.attendanceApproval", attendance.manager.pushSubscription, {
                     title: `Attendance ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your attendance for ${attendance.date} has been ${status}${remarks ? ": " + remarks : ""}`,
                     icon: "/android-chrome-512x512.png",
@@ -219,7 +219,7 @@ const reviewCorrection = async (req, res) => {
 
         if (correction.manager.pushSubscription) {
             try {
-                await sendPush(correction.manager.pushSubscription, {
+                await notifyIfEnabled("manager.correctionApproval", correction.manager.pushSubscription, {
                     title: `Correction ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your correction for ${correction.date} has been ${status}`,
                     icon: "/android-chrome-512x512.png",
@@ -295,7 +295,7 @@ const reviewLeave = async (req, res) => {
 
         if (leave.manager.pushSubscription) {
             try {
-                await sendPush(leave.manager.pushSubscription, {
+                await notifyIfEnabled("manager.leaveApproval", leave.manager.pushSubscription, {
                     title: `Leave ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your ${leave.type} leave (${leave.startDate} to ${leave.endDate}) has been ${status}`,
                     icon: "/android-chrome-512x512.png",

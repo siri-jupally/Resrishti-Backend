@@ -17,7 +17,7 @@ const CorrectionRequest = require("../models/CorrectionRequest");
 const Leave = require("../models/Leave");
 const Employee = require("../models/Employee");
 const Admin = require("../models/Admin");
-const { sendPush } = require("../utils/push");
+const { sendPush, notifyIfEnabled } = require("../utils/push");
 
 // GET /api/manager/attendance/team?date=YYYY-MM-DD
 const getTeamAttendance = async (req, res) => {
@@ -153,7 +153,7 @@ const approveAttendance = async (req, res) => {
         // Notify employee
         if (attendance.employee.pushSubscription) {
             try {
-                await sendPush(attendance.employee.pushSubscription, {
+                await notifyIfEnabled("attendance.approval", attendance.employee.pushSubscription, {
                     title: `Attendance ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your attendance for ${attendance.date} has been ${status}${remarks ? ": " + remarks : ""}`,
                     icon: "/android-chrome-512x512.png",
@@ -192,7 +192,7 @@ const setEmployeeWorkMode = async (req, res) => {
         // Notify employee
         if (employee.pushSubscription) {
             try {
-                await sendPush(employee.pushSubscription, {
+                await notifyIfEnabled("attendance.workModeUpdate", employee.pushSubscription, {
                     title: "Work Mode Updated",
                     body: `Your work mode has been changed to ${workMode}`,
                     icon: "/android-chrome-512x512.png",
@@ -287,7 +287,7 @@ const reviewCorrection = async (req, res) => {
         // Notify employee
         if (correction.employee.pushSubscription) {
             try {
-                await sendPush(correction.employee.pushSubscription, {
+                await notifyIfEnabled("attendance.correctionApproval", correction.employee.pushSubscription, {
                     title: `Correction ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your correction for ${correction.date} has been ${status}`,
                     icon: "/android-chrome-512x512.png",
@@ -372,7 +372,7 @@ const reviewLeave = async (req, res) => {
         // Notify employee
         if (leave.employee.pushSubscription) {
             try {
-                await sendPush(leave.employee.pushSubscription, {
+                await notifyIfEnabled("leave.approvalByManager", leave.employee.pushSubscription, {
                     title: `Leave ${status === "approved" ? "Approved" : "Rejected"}`,
                     body: `Your ${leave.type} leave (${leave.startDate} to ${leave.endDate}) has been ${status}`,
                     icon: "/android-chrome-512x512.png",
@@ -388,7 +388,7 @@ const reviewLeave = async (req, res) => {
             const admins = await Admin.find().select("pushSubscription");
             for (const admin of admins) {
                 if (admin.pushSubscription) {
-                    await sendPush(admin.pushSubscription, {
+                    await notifyIfEnabled("leave.approvalNotifyAdmin", admin.pushSubscription, {
                         title: `Leave ${status === "approved" ? "Approved" : "Rejected"} by Manager`,
                         body: `${leave.employee.name}'s ${leave.type} leave (${leave.startDate} to ${leave.endDate}) was ${status}`,
                         icon: "/android-chrome-512x512.png",

@@ -4,7 +4,7 @@ const Leave = require("../models/Leave");
 const ManagerLeave = require("../models/ManagerLeave");
 const Attendance = require("../models/Attendance");
 const Admin = require("../models/Admin");
-const { sendPush } = require("../utils/push");
+const { sendPush, notifyIfEnabled } = require("../utils/push");
 
 // ==================== MANAGER CRUD ====================
 
@@ -257,7 +257,7 @@ const adminReviewLeave = async (req, res) => {
         // Notify employee
         if (leave.employee.pushSubscription) {
             try {
-                await sendPush(leave.employee.pushSubscription, {
+                await notifyIfEnabled("leave.approvalByAdmin", leave.employee.pushSubscription, {
                     title: `Leave ${status === "approved" ? "Approved" : "Rejected"} by Admin`,
                     body: `Your ${leave.type} leave (${leave.startDate} to ${leave.endDate}) has been ${status} by admin${reviewRemarks ? ": " + reviewRemarks : ""}`,
                     icon: "/android-chrome-512x512.png",

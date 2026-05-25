@@ -23,7 +23,7 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { uploadTaskAttachment } = require("../utils/s3");
 const { getIo } = require("../socketHandler");
-const { sendPush } = require("../utils/push");
+const { sendPush, notifyIfEnabled } = require("../utils/push");
 
 const generateToken = (id) =>
     jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -107,7 +107,7 @@ const updateTaskByEmployee = async (req, res) => {
 
                     // Send Push to Manager
                     if (manager.pushSubscription) {
-                        await sendPush(manager.pushSubscription, {
+                        await notifyIfEnabled("task.statusUpdated", manager.pushSubscription, {
                             title: "Task Status Updated",
                             body: `${req.employee.name} changed status of "${task.title}" to ${status}`,
                             icon: "/pwa-192x192.png",
@@ -131,7 +131,7 @@ const updateTaskByEmployee = async (req, res) => {
             try {
                 const manager = await Manager.findById(task.manager).select("pushSubscription");
                 if (manager && manager.pushSubscription) {
-                    await sendPush(manager.pushSubscription, {
+                    await notifyIfEnabled("task.comment", manager.pushSubscription, {
                         title: "New Comment on Task",
                         body: `${req.employee.name}: ${String(comment).trim().substring(0, 50)}...`,
                         icon: "/pwa-192x192.png",
@@ -207,7 +207,7 @@ const postMessageToTaskAsEmployee = async (req, res) => {
             const managerId = task.manager._id || task.manager;
             const manager = await Manager.findById(managerId).select("pushSubscription");
             if (manager && manager.pushSubscription) {
-                await sendPush(manager.pushSubscription, {
+                await notifyIfEnabled("task.messageFromEmployee", manager.pushSubscription, {
                     title: "New Message from Employee",
                     body: `${req.employee.name}: ${trimmed.substring(0, 50)}...`,
                     icon: "/android-chrome-512x512.png",
@@ -276,7 +276,7 @@ const uploadAttachmentAndPostMessageAsEmployee = [
                 // Notify Manager
                 const manager = await Manager.findById(task.manager).select("pushSubscription");
                 if (manager && manager.pushSubscription) {
-                    await sendPush(manager.pushSubscription, {
+                    await notifyIfEnabled("task.attachmentFromEmployee", manager.pushSubscription, {
                         title: "New Attachment from Employee",
                         body: `${req.employee.name} sent an attachment.`,
                         icon: "/pwa-192x192.png",
