@@ -20,7 +20,21 @@ const ManagerLeave = require("../models/ManagerLeave");
 const ManagerCorrectionRequest = require("../models/ManagerCorrectionRequest");
 const AttendancePolicy = require("../models/AttendancePolicy");
 const Admin = require("../models/Admin");
+const multer = require("multer");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
+const { uploadCheckinPhoto } = require("../utils/s3");
+
+// Live camera capture only — see attendanceController for the same pattern.
+const checkInUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (!/^image\/(jpeg|png|webp)$/i.test(file.mimetype)) {
+            return cb(new Error("Only image/jpeg, image/png, image/webp allowed"));
+        }
+        cb(null, true);
+    },
+}).single("photo");
 
 // Haversine distance in meters
 function haversineDistance(lat1, lng1, lat2, lng2) {
@@ -60,6 +74,9 @@ async function notifyAdmins(type, payload) {
 // POST /api/manager/self-attendance/checkin
 const checkIn = async (req, res) => {
     try {
+        if (!req.file || !req.file.buffer) {
+            return res.status(400).json({ message: "Check-in photo is required" });
+        }
         const { lat, lng, address, workMode, wfhTaskSummary } = req.body;
         const managerId = req.manager._id;
         const today = getTodayStr();
@@ -116,9 +133,24 @@ const checkIn = async (req, res) => {
 
         const effectiveWorkMode = workMode || "WFO";
         const now = new Date();
+
+        let photo;
+        try {
+            photo = await uploadCheckinPhoto({
+                role: "manager",
+                userId: String(managerId),
+                buffer: req.file.buffer,
+                contentType: req.file.mimetype || "image/jpeg",
+            });
+        } catch (uploadErr) {
+            console.error("Manager check-in photo upload failed:", uploadErr);
+            return res.status(500).json({ message: "Failed to store check-in photo" });
+        }
+
         const newCheckIn = {
             time: now,
             location: lat !== undefined ? { lat, lng, address } : undefined,
+            photo,
         };
 
         if (existing) {
@@ -459,6 +491,7 @@ const getPolicy = async (req, res) => {
 
 module.exports = {
     checkIn,
+    checkInUpload,
     checkOut,
     getToday,
     getCalendar,

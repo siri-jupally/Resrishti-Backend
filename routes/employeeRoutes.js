@@ -23,6 +23,7 @@ const {
 } = require("../controllers/employeeController");
 const {
   checkIn,
+  checkInUpload,
   checkOut,
   getToday,
   getCalendar,
@@ -59,7 +60,7 @@ router.post(
 );
 
 // Attendance routes
-router.post("/attendance/checkin", protectEmployee, checkIn);
+router.post("/attendance/checkin", protectEmployee, checkInUpload, checkIn);
 router.post("/attendance/checkout", protectEmployee, checkOut);
 router.get("/attendance/today", protectEmployee, getToday);
 router.get("/attendance/calendar", protectEmployee, getCalendar);

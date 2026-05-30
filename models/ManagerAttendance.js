@@ -23,6 +23,11 @@ const managerAttendanceSchema = new mongoose.Schema(
         checkIn: {
             time: { type: Date },
             location: locationSchema,
+            photo: {
+                key: { type: String },
+                bucket: { type: String },
+                _id: false,
+            },
         },
         checkOut: {
             time: { type: Date },
@@ -35,6 +40,11 @@ const managerAttendanceSchema = new mongoose.Schema(
                 checkIn: {
                     time: { type: Date },
                     location: locationSchema,
+                    photo: {
+                        key: { type: String },
+                        bucket: { type: String },
+                        _id: false,
+                    },
                 },
                 checkOut: {
                     time: { type: Date },

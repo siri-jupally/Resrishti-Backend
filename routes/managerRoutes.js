@@ -84,7 +84,7 @@ router.get("/leaves", protectManager, getLeaveRequests);
 router.patch("/leaves/:id", protectManager, reviewLeave);
 
 // Manager self-attendance routes
-router.post("/self-attendance/checkin", protectManager, selfAttendance.checkIn);
+router.post("/self-attendance/checkin", protectManager, selfAttendance.checkInUpload, selfAttendance.checkIn);
 router.post("/self-attendance/checkout", protectManager, selfAttendance.checkOut);
 router.get("/self-attendance/today", protectManager, selfAttendance.getToday);
 router.get("/self-attendance/calendar", protectManager, selfAttendance.getCalendar);

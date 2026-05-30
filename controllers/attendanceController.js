@@ -22,7 +22,22 @@ const CorrectionRequest = require("../models/CorrectionRequest");
 const Leave = require("../models/Leave");
 const Manager = require("../models/Manager");
 const Admin = require("../models/Admin");
+const multer = require("multer");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
+const { uploadCheckinPhoto } = require("../utils/s3");
+
+// In-memory multer for the check-in selfie. We only accept a live JPEG capture
+// from the browser (camera-only on the client); cap to 5 MB to bound abuse.
+const checkInUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (!/^image\/(jpeg|png|webp)$/i.test(file.mimetype)) {
+            return cb(new Error("Only image/jpeg, image/png, image/webp allowed"));
+        }
+        cb(null, true);
+    },
+}).single("photo");
 
 // Haversine distance in meters between two lat/lng points
 function haversineDistance(lat1, lng1, lat2, lng2) {
@@ -51,6 +66,10 @@ function parseTime(timeStr) {
 // POST /api/employee/attendance/checkin
 const checkIn = async (req, res) => {
     try {
+        // Live camera capture is mandatory — block check-in if no photo file present.
+        if (!req.file || !req.file.buffer) {
+            return res.status(400).json({ message: "Check-in photo is required" });
+        }
         const { lat, lng, address, workMode, wfhTaskSummary } = req.body;
         const employeeId = req.employee._id;
         const today = getTodayStr();
@@ -112,9 +131,26 @@ const checkIn = async (req, res) => {
 
         const effectiveWorkMode = workMode || req.employee.defaultWorkMode || "WFO";
         const now = new Date();
+
+        // Upload selfie to S3 (under `checkin-photos/` — auto-expires after 7 days
+        // via the bucket lifecycle rule applied by scripts/apply-checkin-photo-lifecycle.js).
+        let photo;
+        try {
+            photo = await uploadCheckinPhoto({
+                role: "employee",
+                userId: String(employeeId),
+                buffer: req.file.buffer,
+                contentType: req.file.mimetype || "image/jpeg",
+            });
+        } catch (uploadErr) {
+            console.error("Check-in photo upload failed:", uploadErr);
+            return res.status(500).json({ message: "Failed to store check-in photo" });
+        }
+
         const newCheckIn = {
             time: now,
             location: lat !== undefined ? { lat, lng, address } : undefined,
+            photo,
         };
 
         if (existing) {
@@ -498,6 +534,7 @@ const getPolicy = async (req, res) => {
 
 module.exports = {
     checkIn,
+    checkInUpload,
     checkOut,
     getToday,
     getCalendar,

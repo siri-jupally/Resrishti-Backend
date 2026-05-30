@@ -35,6 +35,12 @@ const attendanceSchema = new mongoose.Schema(
         checkIn: {
             time: { type: Date },
             location: locationSchema,
+            // S3-stored selfie photo; auto-expires after 7 days via bucket lifecycle rule.
+            photo: {
+                key: { type: String },
+                bucket: { type: String },
+                _id: false,
+            },
         },
         checkOut: {
             time: { type: Date },
@@ -47,6 +53,11 @@ const attendanceSchema = new mongoose.Schema(
                 checkIn: {
                     time: { type: Date },
                     location: locationSchema,
+                    photo: {
+                        key: { type: String },
+                        bucket: { type: String },
+                        _id: false,
+                    },
                 },
                 checkOut: {
                     time: { type: Date },
