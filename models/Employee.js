@@ -68,14 +68,24 @@ const employeeSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Always trim the password before hashing and comparing. Without this, a single
+// stray trailing space / newline (introduced by copy-paste in the admin form,
+// autofill, or mobile autocorrect) gets baked into the hash and the user is
+// then locked out when they type the "clean" version. Symmetric trim on both
+// hash and compare keeps the comparison stable regardless of where the value
+// originated.
 employeeSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
+  const cleaned = String(this.password ?? "").trim();
+  if (!cleaned) throw new Error("Password cannot be empty or whitespace-only");
   const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
+  this.password = await bcrypt.hash(cleaned, salt);
 });
 
 employeeSchema.methods.comparePassword = async function (candidatePassword) {
-  return await bcrypt.compare(candidatePassword, this.password);
+  const cleaned = String(candidatePassword ?? "").trim();
+  if (!cleaned || !this.password) return false;
+  return await bcrypt.compare(cleaned, this.password);
 };
 
 module.exports = mongoose.model("Employee", employeeSchema);

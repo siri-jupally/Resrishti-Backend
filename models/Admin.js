@@ -16,22 +16,20 @@ const adminSchema = new mongoose.Schema({
     pushSubscription: { type: Object }
 });
 
-// Hash password before saving
-// Hash password before saving
+// See Employee.js — trim symmetrically on hash + compare so whitespace baked
+// in during form copy-paste / autofill doesn't lock the user out later.
 adminSchema.pre('save', async function () {
     if (!this.isModified('password')) return;
-
-    try {
-        const salt = await bcrypt.genSalt(10);
-        this.password = await bcrypt.hash(this.password, salt);
-    } catch (err) {
-        throw err;
-    }
+    const cleaned = String(this.password ?? '').trim();
+    if (!cleaned) throw new Error('Password cannot be empty or whitespace-only');
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(cleaned, salt);
 });
 
-// Method to compare password
 adminSchema.methods.comparePassword = async function (candidatePassword) {
-    return await bcrypt.compare(candidatePassword, this.password);
+    const cleaned = String(candidatePassword ?? '').trim();
+    if (!cleaned || !this.password) return false;
+    return await bcrypt.compare(cleaned, this.password);
 };
 
 module.exports = mongoose.model('Admin', adminSchema);
