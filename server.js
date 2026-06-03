@@ -104,7 +104,12 @@ const loginLimiter = rateLimit({
 
 app.use("/api", apiLimiter);
 app.post(
-  ["/api/employee/login", "/api/manager/login", "/api/admin/login"],
+  [
+    "/api/employee/login",
+    "/api/manager/login",
+    "/api/admin/login",
+    "/api/client/login",
+  ],
   loginLimiter
 );
 
@@ -152,9 +157,62 @@ mongoose
 // Routes
 app.use("/api/testimonials", require("./routes/testimonialRoutes"));
 app.use("/api/admin", require("./routes/adminRoutes"));
+app.use("/api/admin/clients", require("./routes/clientRoutes"));
 app.use("/api/blogs", require("./routes/blogRoutes"));
 app.use("/api/manager", require("./routes/managerRoutes"));
 app.use("/api/employee", require("./routes/employeeRoutes"));
+// Client portal (external customers). The onboarding sub-router (Backend B)
+// is mounted separately at `/api/client/onboarding` — Express picks the
+// longer prefix first so the two coexist without conflict.
+app.use("/api/client", require("./routes/clientPortalRoutes"));
+// Client portal pickup endpoints (Backend D). Mounted at a more specific
+// path than `/api/client` so Express resolves it first.
+app.use("/api/client/pickups", require("./routes/clientPortalPickupRoutes"));
+
+// Client Management module — admin/coordinator pickup triage endpoints
+// (Phase 1, Chunk 2). Auth via protectTriage (Admin OR Manager+canCoordinate).
+app.use("/api/admin/pickups", require("./routes/adminPickupRoutes"));
+// Supervisor pool — exposed at the spec'd path /api/admin/supervisor-pool.
+const { protectTriage } = require("./middleware/authTriage");
+const { getSupervisorPool } = require("./controllers/adminPickupController");
+app.get("/api/admin/supervisor-pool", protectTriage, getSupervisorPool);
+
+// Client Management module — onboarding routes (Phase 1).
+// `adminRouter` extends the /api/admin/clients prefix with the
+// resend-onboarding action. `publicRouter` is the unauthenticated
+// magic-link portal surface — the token in the body IS the credential.
+const onboardingRoutes = require("./routes/onboardingRoutes");
+app.use("/api/admin/clients", onboardingRoutes.adminRouter);
+app.use("/api/client/onboarding", onboardingRoutes.publicRouter);
+
+// Client Management module — supervisor field-execution routes (Phase 1, Chunk 2).
+// The same controller is mounted under each of the three role prefixes; each
+// instance is guarded by the role's own auth middleware. The controller reads
+// whichever of req.employee / req.manager / req.admin the middleware set, so
+// any user with `canSupervise: true` can advance pickups assigned to them.
+const supervisorPickupRoutes = require("./routes/supervisorPickupRoutes");
+app.use(
+  "/api/employee/my-pickups",
+  supervisorPickupRoutes(require("./middleware/authEmployee").protectEmployee)
+);
+app.use(
+  "/api/manager/my-pickups",
+  supervisorPickupRoutes(require("./middleware/authManager").protectManager)
+);
+app.use(
+  "/api/admin/my-pickups",
+  supervisorPickupRoutes(require("./middleware/authMiddleware").protect)
+);
+
+// Client Management module — manager/coordinator certificate workflow
+// (Phase 1, Chunk 3). Issue / send / revise the rendered CoD PDFs. Same
+// protectTriage gate as /api/admin/pickups (Admin OR Manager+canCoordinate).
+app.use("/api/manager/certificates", require("./routes/certificateRoutes"));
+
+// Client Management module — public live-stats endpoint (Phase 1, Chunk 3).
+// Unauthenticated; reads from the StatsSnapshot cache recomputed every 15 min
+// by services/statsJob.js. See clientmngmt.md §7.6, §12.
+app.use("/api/public", require("./routes/publicStatsRoutes"));
 
 app.get("/", (req, res) => {
   res.status(200).send("Backend is running ✔");
@@ -182,6 +240,16 @@ app.get("/api/attachments/download", async (req, res) => {
     // Check for inline viewing request
     const disposition = req.query.inline === "true" ? "inline" : "attachment";
     res.setHeader("Content-Disposition", `${disposition}; filename="${safeName}"`);
+
+    // Allow this response to be embedded in <iframe>/<img> from any origin
+    // (the rest of the app sets a global helmet COEP/CORP that would otherwise
+    // block cross-port PDF previews in the manager certificate panel).
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
+    res.removeHeader("X-Frame-Options");
+    // Override helmet's default CSP which sets `frame-ancestors 'self'` and
+    // blocks the cert PDF preview iframe in the manager dashboard.
+    res.setHeader("Content-Security-Policy", "frame-ancestors *");
 
     // data.Body is a stream in Node.js; pipe to response
     const stream = data.Body;
@@ -281,4 +349,14 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Client Management module — start the public-stats recompute job (Phase 1,
+// Chunk 3). Runs once on boot then every 15 min. Wrapped in try/catch so a
+// require-time crash (e.g. missing model) can never take the server down.
+// See services/statsJob.js + clientmngmt.md §12.1.
+try {
+  require("./services/statsJob").startStatsJob();
+} catch (err) {
+  console.error("Failed to start stats job:", err.message);
+}
 // test change

@@ -151,6 +151,35 @@ const uploadCheckinPhoto = async ({ role, userId, buffer, contentType }) => {
   return { bucket, key };
 };
 
+/**
+ * Upload a pickup-evidence photo. Object key is namespaced under
+ * `pickup-evidence/<pickupID>/<status>-<timestamp>.jpg` so the bucket lifecycle
+ * rule can target the prefix `pickup-evidence/` for 30-day expiration.
+ *
+ * @param {Object} params
+ * @param {string} params.pickupID - Human-friendly pickup ID (e.g. PU-20260512-A7F2).
+ * @param {string} params.status - Status this evidence captures (en-route, at-client, etc.).
+ * @param {Buffer} params.buffer
+ * @param {string} [params.contentType="image/jpeg"]
+ * @returns {Promise<{bucket: string, key: string}>}
+ */
+const uploadPickupEvidence = async ({ pickupID, status, buffer, contentType }) => {
+    const bucket = process.env.S3_BUCKET_NAME;
+    if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
+
+    const key = `pickup-evidence/${pickupID}/${status}-${Date.now()}.jpg`;
+    const client = getS3Client();
+    await client.send(
+        new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: buffer,
+            ContentType: contentType || "image/jpeg",
+        })
+    );
+    return { bucket, key };
+};
+
 const deleteS3Object = async ({ bucket, key }) => {
   if (!bucket || !key) return;
   const client = getS3Client();
@@ -199,12 +228,57 @@ const applyCheckinPhotoLifecycle = async () => {
   return { bucket, ruleId: RULE_ID };
 };
 
+/**
+ * Apply a 30-day expiration lifecycle rule to objects under the `pickup-evidence/`
+ * prefix. Idempotent: merges with existing rules and only touches rule id
+ * `pickup-evidence-30d-expiry`. Preserves any other lifecycle rules already
+ * configured on the bucket (e.g., `checkin-photos-7d-expiry`).
+ *
+ * Requires `s3:PutLifecycleConfiguration` on the bucket.
+ */
+const applyPickupEvidenceLifecycle = async () => {
+    const bucket = process.env.S3_BUCKET_NAME;
+    if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
+
+    const client = getS3Client();
+    const RULE_ID = "pickup-evidence-30d-expiry";
+
+    let existingRules = [];
+    try {
+        const current = await client.send(
+            new GetBucketLifecycleConfigurationCommand({ Bucket: bucket })
+        );
+        existingRules = (current.Rules || []).filter((r) => r.ID !== RULE_ID);
+    } catch (err) {
+        // NoSuchLifecycleConfiguration is expected when no rules exist yet.
+        if (err.name !== "NoSuchLifecycleConfiguration") throw err;
+    }
+
+    const newRule = {
+        ID: RULE_ID,
+        Status: "Enabled",
+        Filter: { Prefix: "pickup-evidence/" },
+        Expiration: { Days: 30 },
+    };
+
+    await client.send(
+        new PutBucketLifecycleConfigurationCommand({
+            Bucket: bucket,
+            LifecycleConfiguration: { Rules: [...existingRules, newRule] },
+        })
+    );
+
+    return { bucket, ruleId: RULE_ID };
+};
+
 module.exports = {
   uploadTaskAttachment,
   sanitizeFileName,
   getS3Client,
   uploadFile,
   uploadCheckinPhoto,
+  uploadPickupEvidence,
   deleteS3Object,
   applyCheckinPhotoLifecycle,
+  applyPickupEvidenceLifecycle,
 };

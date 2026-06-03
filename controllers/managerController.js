@@ -80,7 +80,7 @@ const loginManager = async (req, res) => {
 
 // POST /api/manager/employees - create employee under manager
 const createEmployee = async (req, res) => {
-  const { name, email, password, jobRole, department, joiningDate } = req.body;
+  const { name, email, password, jobRole, department, joiningDate, canSupervise } = req.body;
   try {
     const exists = await Employee.findOne({ email });
     if (exists)
@@ -93,10 +93,11 @@ const createEmployee = async (req, res) => {
       jobRole: jobRole || undefined,
       department: department || undefined,
       joiningDate: joiningDate || undefined,
+      canSupervise: canSupervise === true,
     });
     res
       .status(201)
-      .json({ _id: employee._id, email: employee.email, name: employee.name, jobRole: employee.jobRole, department: employee.department, joiningDate: employee.joiningDate });
+      .json({ _id: employee._id, email: employee.email, name: employee.name, jobRole: employee.jobRole, department: employee.department, joiningDate: employee.joiningDate, canSupervise: employee.canSupervise });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -137,7 +138,7 @@ const deleteEmployee = async (req, res) => {
 
 // PATCH /api/manager/employees/:id
 const updateEmployee = async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, canSupervise } = req.body;
   try {
     const employee = await Employee.findOne({
       _id: req.params.id,
@@ -151,13 +152,14 @@ const updateEmployee = async (req, res) => {
     if (name) employee.name = name;
     if (email) employee.email = email;
     if (password) {
-      // In a real app, logic usually presumes the model hooks handle hashing,
-      // but Employee model might rely on `pre('save')`. let's check or do it manually if needed.
       employee.password = password;
+    }
+    if (typeof canSupervise === "boolean") {
+      employee.canSupervise = canSupervise;
     }
 
     await employee.save();
-    res.json({ _id: employee._id, email: employee.email, name: employee.name });
+    res.json({ _id: employee._id, email: employee.email, name: employee.name, canSupervise: employee.canSupervise });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

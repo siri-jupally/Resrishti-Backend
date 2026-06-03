@@ -11,7 +11,7 @@ const { sendPush, notifyIfEnabled } = require("../utils/push");
 // POST /api/admin/managers
 const createManager = async (req, res) => {
     try {
-        const { name, email, password, jobRole, department, joiningDate } = req.body;
+        const { name, email, password, jobRole, department, joiningDate, canSupervise, canCoordinate } = req.body;
         if (!email || !password) {
             return res.status(400).json({ message: "Email and password are required" });
         }
@@ -26,6 +26,8 @@ const createManager = async (req, res) => {
             jobRole: jobRole || undefined,
             department: department || undefined,
             joiningDate: joiningDate || undefined,
+            canSupervise: canSupervise === true,
+            canCoordinate: canCoordinate === true,
         });
         res.status(201).json({
             _id: manager._id,
@@ -35,6 +37,8 @@ const createManager = async (req, res) => {
             jobRole: manager.jobRole,
             department: manager.department,
             joiningDate: manager.joiningDate,
+            canSupervise: manager.canSupervise,
+            canCoordinate: manager.canCoordinate,
             createdAt: manager.createdAt,
         });
     } catch (err) {
@@ -75,13 +79,15 @@ const updateManager = async (req, res) => {
             return res.status(404).json({ message: "Manager not found" });
         }
 
-        const { name, email, password, jobRole, department, joiningDate } = req.body;
+        const { name, email, password, jobRole, department, joiningDate, canSupervise, canCoordinate } = req.body;
         if (name !== undefined) manager.name = name;
         if (email !== undefined) manager.email = email;
         if (password) manager.password = password;
         if (jobRole !== undefined) manager.jobRole = jobRole;
         if (department !== undefined) manager.department = department;
         if (joiningDate !== undefined) manager.joiningDate = joiningDate;
+        if (typeof canSupervise === "boolean") manager.canSupervise = canSupervise;
+        if (typeof canCoordinate === "boolean") manager.canCoordinate = canCoordinate;
 
         await manager.save();
         res.json({
@@ -89,6 +95,8 @@ const updateManager = async (req, res) => {
             name: manager.name,
             email: manager.email,
             role: manager.role,
+            canSupervise: manager.canSupervise,
+            canCoordinate: manager.canCoordinate,
         });
     } catch (err) {
         res.status(500).json({ message: err.message });

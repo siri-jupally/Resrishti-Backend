@@ -20,13 +20,22 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER) {
 }
 
 /**
- * Send an email
+ * Send an email.
+ *
+ * The 5th `attachments` parameter is OPTIONAL and additive — existing 4-arg
+ * callers are unaffected. When provided, it's passed through to nodemailer's
+ * `sendMail` as-is, so each entry should follow the nodemailer attachment
+ * shape: `{ filename, content, contentType, ...nodemailerOpts }`.
+ *
+ * Added in Phase 1, Chunk 3 for certificate-of-disposal PDF delivery.
+ *
  * @param {string|string[]} to - Recipient email(s)
  * @param {string} subject - Email subject
  * @param {string} text - Plain text body
  * @param {string} html - HTML body
+ * @param {Array<{filename:string,content:Buffer|string,contentType?:string}>} [attachments]
  */
-const sendEmail = async (to, subject, text, html) => {
+const sendEmail = async (to, subject, text, html, attachments) => {
     try {
         if (!transporter) {
             // Create Ethereal account for development if not already created
@@ -48,6 +57,12 @@ const sendEmail = async (to, subject, text, html) => {
             subject,
             text,
             html,
+            // Only spread the attachments key when callers passed a non-empty
+            // array — nodemailer is fine with omitted `attachments` but this
+            // keeps the call-site logs cleaner and avoids `attachments: undefined`.
+            ...(Array.isArray(attachments) && attachments.length
+                ? { attachments }
+                : {}),
         });
 
         if (nodemailer.getTestMessageUrl && info) {

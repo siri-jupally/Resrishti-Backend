@@ -52,6 +52,10 @@ const managerSchema = new mongoose.Schema(
     jobRole: { type: String },
     department: { type: String },
     joiningDate: { type: String },
+
+    // Client-Management module — job tags (not roles).
+    canSupervise: { type: Boolean, default: false },
+    canCoordinate: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

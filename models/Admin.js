@@ -13,7 +13,12 @@ const adminSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    pushSubscription: { type: Object }
+    pushSubscription: { type: Object },
+
+    // Client-Management module — job tags (not roles).
+    // Admins default to canCoordinate=true (they triage incoming requests).
+    canSupervise: { type: Boolean, default: false },
+    canCoordinate: { type: Boolean, default: true },
 });
 
 // See Employee.js — trim symmetrically on hash + compare so whitespace baked

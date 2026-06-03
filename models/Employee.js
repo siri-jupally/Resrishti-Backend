@@ -64,6 +64,12 @@ const employeeSchema = new mongoose.Schema(
     jobRole: { type: String },
     department: { type: String },
     joiningDate: { type: String },
+
+    // Client-Management module — job tags (not roles).
+    // canSupervise: can be assigned as the on-site supervisor for a pickup.
+    // canCoordinate: can triage incoming client pickup requests (typically Admin/Manager only).
+    canSupervise: { type: Boolean, default: false },
+    canCoordinate: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
