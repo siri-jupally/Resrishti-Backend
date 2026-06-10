@@ -1128,12 +1128,19 @@ describe("Correction Request Flow", () => {
         });
     });
 
+    // Corrections are now constrained to the current month, so tests that submit via
+    // the controller build dates relative to "today".
+    const _today = new Date();
+    const _ymd = (d) =>
+        `${_today.getFullYear()}-${String(_today.getMonth() + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const currentMonthDate = _ymd(1); // 1st of current month is always <= today
+
     test("should submit a correction request", async () => {
         const attendance = await Attendance.create({
             employee: employee._id,
-            date: "2026-03-20",
-            checkIn: { time: new Date("2026-03-20T09:00:00Z") },
-            checkOut: { time: new Date("2026-03-20T17:00:00Z") },
+            date: currentMonthDate,
+            checkIn: { time: new Date(`${currentMonthDate}T09:00:00Z`) },
+            checkOut: { time: new Date(`${currentMonthDate}T17:00:00Z`) },
             workingHours: 8,
             status: "present",
         });
@@ -1143,7 +1150,7 @@ describe("Correction Request Flow", () => {
             employee: employee,
             body: {
                 attendanceId: attendance._id.toString(),
-                requestedCheckIn: "2026-03-20T08:30:00Z",
+                requestedCheckIn: `${currentMonthDate}T08:30:00Z`,
                 reason: "Forgot to check in earlier",
             },
         });
@@ -1153,6 +1160,86 @@ describe("Correction Request Flow", () => {
         expect(res.statusCode).toBe(201);
         expect(res.body.reason).toBe("Forgot to check in earlier");
         expect(res.body.status).toBe("pending");
+    });
+
+    test("should submit a correction for an ABSENT day with no existing record", async () => {
+        const { submitCorrection } = require("../controllers/attendanceController");
+        const req = mockReq({
+            employee: employee,
+            body: {
+                date: currentMonthDate,
+                correctionType: "absence",
+                requestedCheckIn: `${currentMonthDate}T09:00:00Z`,
+                requestedCheckOut: `${currentMonthDate}T17:00:00Z`,
+                reason: "Was present but attendance was not marked",
+            },
+        });
+        const res = mockRes();
+        await submitCorrection(req, res);
+
+        expect(res.statusCode).toBe(201);
+        expect(res.body.date).toBe(currentMonthDate);
+        expect(res.body.correctionType).toBe("absence");
+        // No attendance record existed, so the correction is unlinked until approval.
+        expect(res.body.attendance == null).toBe(true);
+    });
+
+    test("should reject a correction for a future date", async () => {
+        const future = new Date(_today.getTime() + 2 * 86400000);
+        const futureStr = `${future.getFullYear()}-${String(future.getMonth() + 1).padStart(2, "0")}-${String(future.getDate()).padStart(2, "0")}`;
+        // Only meaningful if the future date is still within the current month.
+        if (future.getMonth() !== _today.getMonth()) return;
+
+        const { submitCorrection } = require("../controllers/attendanceController");
+        const req = mockReq({
+            employee: employee,
+            body: { date: futureStr, reason: "Future correction" },
+        });
+        const res = mockRes();
+        await submitCorrection(req, res);
+
+        expect(res.statusCode).toBe(400);
+    });
+
+    test("should reject a correction for a date outside the current month", async () => {
+        const { submitCorrection } = require("../controllers/attendanceController");
+        const req = mockReq({
+            employee: employee,
+            body: { date: "2020-01-15", reason: "Old correction" },
+        });
+        const res = mockRes();
+        await submitCorrection(req, res);
+
+        expect(res.statusCode).toBe(400);
+    });
+
+    test("should create an attendance record when an absent-day correction is approved", async () => {
+        const correction = await CorrectionRequest.create({
+            employee: employee._id,
+            date: currentMonthDate,
+            correctionType: "absence",
+            requestedCheckIn: new Date(`${currentMonthDate}T09:00:00Z`),
+            requestedCheckOut: new Date(`${currentMonthDate}T17:00:00Z`),
+            reason: "Was present, not marked",
+        });
+
+        const { reviewCorrection } = require("../controllers/attendanceManagerController");
+        const req = mockReq({
+            manager: manager,
+            params: { id: correction._id.toString() },
+            body: { status: "approved" },
+        });
+        const res = mockRes();
+        await reviewCorrection(req, res);
+
+        expect(res.body.status).toBe("approved");
+
+        // A brand-new attendance record should now exist for that date.
+        const created = await Attendance.findOne({ employee: employee._id, date: currentMonthDate });
+        expect(created).not.toBeNull();
+        expect(created.status).toBe("present");
+        expect(created.approvalStatus).toBe("approved");
+        expect(created.workingHours).toBe(8); // 09:00 -> 17:00
     });
 
     test("should reject correction without attendanceId", async () => {
@@ -2037,8 +2124,108 @@ describe("WFH Limit Enforcement", () => {
 });
 
 // ========================================================================
+// SECTION 22: Per-Employee Calendar (Manager view)
+// ========================================================================
+describe("Manager — Employee Calendar", () => {
+    let manager, employee;
+
+    beforeEach(async () => {
+        manager = await Manager.create({
+            name: "Mgr", email: "m@t.com", password: "pass123",
+        });
+        employee = await Employee.create({
+            name: "Emp", email: "e@t.com", password: "pass123", manager: manager._id,
+        });
+    });
+
+    test("should return a specific employee's monthly records, holidays and leaves", async () => {
+        await Attendance.create({ employee: employee._id, date: "2026-03-10", status: "present" });
+        await Attendance.create({ employee: employee._id, date: "2026-03-20", status: "present" });
+        await Attendance.create({ employee: employee._id, date: "2026-04-01", status: "present" }); // other month
+        await AttendancePolicy.create({ holidays: [{ date: "2026-03-14", name: "Holi" }] });
+        await Leave.create({
+            employee: employee._id, type: "casual",
+            startDate: "2026-03-25", endDate: "2026-03-26", reason: "Trip", status: "approved",
+        });
+
+        const { getEmployeeCalendar } = require("../controllers/attendanceManagerController");
+        const req = mockReq({
+            manager,
+            params: { employeeId: employee._id.toString() },
+            query: { month: "3", year: "2026" },
+        });
+        const res = mockRes();
+        await getEmployeeCalendar(req, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.records.length).toBe(2);
+        expect(res.body.holidays.length).toBe(1);
+        expect(res.body.leaves.length).toBe(1);
+        expect(res.body.employee._id.toString()).toBe(employee._id.toString());
+    });
+
+    test("should reject viewing an employee that does not report to the manager", async () => {
+        const otherManager = await Manager.create({
+            name: "Other", email: "other@t.com", password: "pass123",
+        });
+        const foreignEmp = await Employee.create({
+            name: "Foreign", email: "f@t.com", password: "pass123", manager: otherManager._id,
+        });
+
+        const { getEmployeeCalendar } = require("../controllers/attendanceManagerController");
+        const req = mockReq({
+            manager,
+            params: { employeeId: foreignEmp._id.toString() },
+            query: { month: "3", year: "2026" },
+        });
+        const res = mockRes();
+        await getEmployeeCalendar(req, res);
+
+        expect(res.statusCode).toBe(404);
+    });
+});
+
+// ========================================================================
 // SECTION 21: Weekend Status Test
 // ========================================================================
+describe("Weekly-off & Weekend Exceptions (helper)", () => {
+    const { isWeekOff } = require("../utils/attendanceDays");
+    const policy = {
+        weeklyOffDays: [0, 6], // Sun, Sat
+        weekendExceptions: [
+            { date: "2026-06-13", type: "working" }, // a Saturday made working
+            { date: "2026-06-09", type: "off" },     // a Tuesday made off
+        ],
+    };
+
+    test("Saturday is a week-off by default", () => {
+        expect(isWeekOff("2026-06-20", policy)).toBe(true); // Saturday, no exception
+    });
+
+    test("a normal weekday is a working day", () => {
+        expect(isWeekOff("2026-06-16", policy)).toBe(false); // Tuesday, no exception
+    });
+
+    test("a 'working' exception overrides a default week-off (Saturday)", () => {
+        expect(isWeekOff("2026-06-13", policy)).toBe(false);
+    });
+
+    test("an 'off' exception overrides a default working day (Tuesday)", () => {
+        expect(isWeekOff("2026-06-09", policy)).toBe(true);
+    });
+
+    test("falls back to Sat/Sun when policy is missing", () => {
+        expect(isWeekOff("2026-06-13", null)).toBe(true);  // Saturday
+        expect(isWeekOff("2026-06-16", null)).toBe(false); // Tuesday
+    });
+
+    test("respects a custom weeklyOffDays list (e.g. only Sunday off)", () => {
+        const sunOnly = { weeklyOffDays: [0], weekendExceptions: [] };
+        expect(isWeekOff("2026-06-13", sunOnly)).toBe(false); // Saturday now working
+        expect(isWeekOff("2026-06-14", sunOnly)).toBe(true);  // Sunday off
+    });
+});
+
 describe("Weekend Handling", () => {
     test("BUG: weekend status exists in enum but is never automatically assigned", () => {
         // The Attendance model has "weekend" as a valid status, but no code

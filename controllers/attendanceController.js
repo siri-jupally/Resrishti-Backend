@@ -25,6 +25,7 @@ const Admin = require("../models/Admin");
 const multer = require("multer");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { uploadCheckinPhoto } = require("../utils/s3");
+const { isWeekOff } = require("../utils/attendanceDays");
 
 // In-memory multer for the check-in selfie. We only accept a live JPEG capture
 // from the browser (camera-only on the client); cap to 5 MB to bound abuse.
@@ -186,6 +187,7 @@ const checkIn = async (req, res) => {
             existing.status = "present";
             existing.approvalStatus = locationWithinBoundary === false ? "pending" : "auto-approved";
             existing.isLateCheckIn = isLateCheckIn;
+            existing.isWeekendWork = isWeekOff(today, policy);
             existing.locationWithinBoundary = locationWithinBoundary;
             if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
             await existing.save();
@@ -200,6 +202,7 @@ const checkIn = async (req, res) => {
             status: "present",
             approvalStatus: locationWithinBoundary === false ? "pending" : "auto-approved",
             isLateCheckIn,
+            isWeekendWork: isWeekOff(today, policy),
             locationWithinBoundary,
             wfhTaskSummary: wfhTaskSummary || undefined,
         });
@@ -347,7 +350,7 @@ const getCalendar = async (req, res) => {
             endDate: { $gte: startDate },
         });
 
-        res.json({ records, holidays, leaves });
+        res.json({ records, holidays, leaves, weeklyOffDays: policy?.weeklyOffDays || [0, 6], weekendExceptions: policy?.weekendExceptions || [] });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -356,28 +359,57 @@ const getCalendar = async (req, res) => {
 // POST /api/employee/attendance/correction
 const submitCorrection = async (req, res) => {
     try {
-        const { attendanceId, requestedCheckIn, requestedCheckOut, reason } = req.body;
-        if (!attendanceId || !reason) {
-            return res.status(400).json({ message: "attendanceId and reason are required" });
+        const { attendanceId, date, correctionType, requestedCheckIn, requestedCheckOut, reason } = req.body;
+        if (!reason) {
+            return res.status(400).json({ message: "reason is required" });
         }
 
-        const attendance = await Attendance.findById(attendanceId);
+        // Resolve the target date. Employees can now file a correction for ANY date in
+        // the current month — including absent days that have no Attendance record yet.
+        // A legacy `attendanceId` reference is still accepted for backward compatibility.
+        let attendance = null;
+        let targetDate = date;
+
+        if (attendanceId) {
+            attendance = await Attendance.findById(attendanceId);
+            if (!attendance) {
+                return res.status(404).json({ message: "Attendance record not found" });
+            }
+            if (String(attendance.employee) !== String(req.employee._id)) {
+                return res.status(403).json({ message: "Not authorized" });
+            }
+            targetDate = attendance.date;
+        }
+
+        if (!targetDate || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+            return res.status(400).json({ message: "A valid date is required" });
+        }
+
+        // Validation: current month only, and no future dates.
+        const now = new Date();
+        const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+        if (targetDate < monthStart) {
+            return res.status(400).json({ message: "Corrections are only allowed for the current month" });
+        }
+        if (targetDate > todayStr) {
+            return res.status(400).json({ message: "Cannot submit a correction for a future date" });
+        }
+
+        // Link an existing record for this date if one exists (absent days have none).
         if (!attendance) {
-            return res.status(404).json({ message: "Attendance record not found" });
-        }
-        if (String(attendance.employee) !== String(req.employee._id)) {
-            return res.status(403).json({ message: "Not authorized" });
+            attendance = await Attendance.findOne({ employee: req.employee._id, date: targetDate });
         }
 
-        // Parse the requested times. The frontend now sends a full ISO timestamp built
-        // from the attendance date + picked HH:MM in the user's local timezone, so the
-        // instant is unambiguous. A bare "HH:MM" string is still accepted as a fallback
-        // (interpreted on the attendance date in the server's local timezone).
+        // Parse the requested times. The frontend sends a full ISO timestamp built from
+        // the target date + picked HH:MM in the user's local timezone, so the instant is
+        // unambiguous. A bare "HH:MM" string is still accepted as a fallback (interpreted
+        // on the target date in the server's local timezone).
         const parseTimeValue = (val) => {
             if (!val) return undefined;
             if (typeof val === "string" && /^\d{1,2}:\d{2}(:\d{2})?$/.test(val)) {
                 const [h, m] = val.split(":").map(Number);
-                const d = new Date(attendance.date + "T00:00:00");
+                const d = new Date(targetDate + "T00:00:00");
                 d.setHours(h, m, 0, 0);
                 return d;
             }
@@ -389,8 +421,9 @@ const submitCorrection = async (req, res) => {
 
         const correction = await CorrectionRequest.create({
             employee: req.employee._id,
-            attendance: attendanceId,
-            date: attendance.date,
+            attendance: attendance ? attendance._id : undefined,
+            date: targetDate,
+            correctionType: correctionType || "incorrect-data",
             requestedCheckIn: parsedCheckIn || undefined,
             requestedCheckOut: parsedCheckOut || undefined,
             reason,
@@ -402,7 +435,7 @@ const submitCorrection = async (req, res) => {
             if (manager && manager.pushSubscription) {
                 await notifyIfEnabled("attendance", manager.pushSubscription, {
                     title: "Attendance Correction Request",
-                    body: `${req.employee.name} submitted a correction for ${attendance.date}`,
+                    body: `${req.employee.name} submitted a correction for ${targetDate}`,
                     icon: "/android-chrome-512x512.png",
                     data: { url: "/manager/dashboard?tab=attendance&sub=corrections" },
                 });

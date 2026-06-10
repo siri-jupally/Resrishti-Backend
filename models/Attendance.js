@@ -89,6 +89,8 @@ const attendanceSchema = new mongoose.Schema(
         wfhTaskSummary: { type: String },
         isLateCheckIn: { type: Boolean, default: false },
         isEarlyCheckOut: { type: Boolean, default: false },
+        // True when this check-in happened on a weekly-off day (voluntary/overtime work).
+        isWeekendWork: { type: Boolean, default: false },
         locationWithinBoundary: { type: Boolean },
     },
     { timestamps: true }
