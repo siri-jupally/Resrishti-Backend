@@ -289,9 +289,15 @@ const checkOut = async (req, res) => {
             }
         }
 
-        // Determine half-day status
-        if (policy && attendance.workingHours < policy.workingHoursPerDay / 2) {
-            attendance.status = "half-day";
+        // Determine half-day vs present status from the EXPLICIT threshold field
+        // (`halfDayThresholdHours`). Previously this used `workingHoursPerDay / 2`,
+        // which silently broke when the admin set workingHoursPerDay to 24 — half
+        // a 24-hour day is 12 hours, and an 11.7h day got misflagged as half-day.
+        // Also flip back to "present" when above threshold so a corrected/longer
+        // session clears a prior half-day marking.
+        if (policy && attendance.status !== "leave" && attendance.status !== "holiday" && attendance.status !== "weekend") {
+            const threshold = policy.halfDayThresholdHours || 4;
+            attendance.status = attendance.workingHours < threshold ? "half-day" : "present";
         }
 
         if (wfhTaskSummary) {

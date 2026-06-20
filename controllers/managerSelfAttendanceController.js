@@ -283,8 +283,12 @@ const checkOut = async (req, res) => {
             }
         }
 
-        if (policy && attendance.workingHours < policy.workingHoursPerDay / 2) {
-            attendance.status = "half-day";
+        // Use the explicit halfDayThresholdHours, not workingHoursPerDay / 2 —
+        // see employee attendanceController.js for the bug history. Flip back
+        // to "present" when above threshold so corrections clear stale half-days.
+        if (policy && attendance.status !== "leave" && attendance.status !== "holiday" && attendance.status !== "weekend") {
+            const threshold = policy.halfDayThresholdHours || 4;
+            attendance.status = attendance.workingHours < threshold ? "half-day" : "present";
         }
 
         if (wfhTaskSummary) {
