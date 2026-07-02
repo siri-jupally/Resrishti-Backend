@@ -391,12 +391,15 @@ const submitCorrection = async (req, res) => {
             return res.status(400).json({ message: "A valid date is required" });
         }
 
-        // Validation: current month only, and no future dates.
+        // Validation: allowed window is current + previous month, no future dates.
+        // Employees regularly notice missed check-outs a few days into the next
+        // month, so we widen the window to include the whole previous month too.
         const now = new Date();
         const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-        const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-        if (targetDate < monthStart) {
-            return res.status(400).json({ message: "Corrections are only allowed for the current month" });
+        const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const windowStart = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, "0")}-01`;
+        if (targetDate < windowStart) {
+            return res.status(400).json({ message: "Corrections are only allowed for the current or previous month" });
         }
         if (targetDate > todayStr) {
             return res.status(400).json({ message: "Cannot submit a correction for a future date" });
