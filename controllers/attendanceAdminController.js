@@ -32,6 +32,8 @@ const updatePolicy = async (req, res) => {
     try {
         const {
             officeLocations,
+            weeklyOffDays,
+            weekendExceptions,
             workingHoursPerDay,
             graceMinutes,
             halfDayThresholdHours,
@@ -51,6 +53,24 @@ const updatePolicy = async (req, res) => {
         }
 
         if (officeLocations !== undefined) policy.officeLocations = officeLocations;
+        if (weeklyOffDays !== undefined) {
+            // Normalize to a unique, sorted list of valid day numbers (0..6).
+            policy.weeklyOffDays = [...new Set(
+                (Array.isArray(weeklyOffDays) ? weeklyOffDays : [])
+                    .map(Number)
+                    .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+            )].sort((a, b) => a - b);
+        }
+        if (weekendExceptions !== undefined) {
+            // Keep only well-formed, valid-typed entries; one entry per date (last wins).
+            const byDate = {};
+            (Array.isArray(weekendExceptions) ? weekendExceptions : []).forEach((e) => {
+                if (e && /^\d{4}-\d{2}-\d{2}$/.test(e.date) && ["working", "off"].includes(e.type)) {
+                    byDate[e.date] = { date: e.date, type: e.type, note: e.note || undefined };
+                }
+            });
+            policy.weekendExceptions = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+        }
         if (workingHoursPerDay !== undefined) policy.workingHoursPerDay = workingHoursPerDay;
         if (graceMinutes !== undefined) policy.graceMinutes = graceMinutes;
         if (halfDayThresholdHours !== undefined) policy.halfDayThresholdHours = halfDayThresholdHours;

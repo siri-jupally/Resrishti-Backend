@@ -16,13 +16,19 @@
 const ManagerAttendance = require("../models/ManagerAttendance");
 const ManagerLeave = require("../models/ManagerLeave");
 const ManagerCorrectionRequest = require("../models/ManagerCorrectionRequest");
+const AttendancePolicy = require("../models/AttendancePolicy");
 const Manager = require("../models/Manager");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
+const { isWeekOff } = require("../utils/attendanceDays");
 
 // GET /api/admin/manager-attendance/team?date=YYYY-MM-DD
 const getManagersAttendance = async (req, res) => {
     try {
         const date = req.query.date || new Date().toISOString().split("T")[0];
+
+        // Is this a weekly-off day? If so, missing records are "weekend", not "absent".
+        const policy = await AttendancePolicy.findOne();
+        const dayIsOff = isWeekOff(date, policy);
 
         const managers = await Manager.find().select("-password");
         const managerIds = managers.map((m) => m._id);
@@ -47,7 +53,7 @@ const getManagersAttendance = async (req, res) => {
                 },
                 attendance: record || {
                     date,
-                    status: "absent",
+                    status: dayIsOff ? "weekend" : "absent",
                     approvalStatus: null,
                 },
             };
@@ -56,15 +62,17 @@ const getManagersAttendance = async (req, res) => {
         const summary = {
             total: managers.length,
             present: records.filter((r) => r.status === "present").length,
-            absent:
-                managers.length -
-                records.filter((r) =>
-                    ["present", "half-day", "leave", "holiday", "weekend"].includes(r.status)
-                ).length,
+            absent: dayIsOff
+                ? 0
+                : managers.length -
+                  records.filter((r) =>
+                      ["present", "half-day", "leave", "holiday", "weekend"].includes(r.status)
+                  ).length,
             wfh: records.filter((r) => r.workMode === "WFH").length,
             leave: records.filter((r) => r.status === "leave").length,
             late: records.filter((r) => r.isLateCheckIn).length,
             outOfBoundary: records.filter((r) => r.locationWithinBoundary === false).length,
+            isWeekOff: dayIsOff,
         };
 
         res.json({ date, team: teamData, summary });
@@ -109,6 +117,48 @@ const getManagersSummary = async (req, res) => {
         });
 
         res.json({ month, year, summaries });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// GET /api/admin/manager-attendance/manager/:managerId/calendar?month=3&year=2026
+// Monthly attendance calendar for a specific manager.
+const getManagerCalendar = async (req, res) => {
+    try {
+        const { managerId } = req.params;
+
+        const manager = await Manager.findById(managerId).select("name email");
+        if (!manager) {
+            return res.status(404).json({ message: "Manager not found" });
+        }
+
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
+        const endMonth = month === 12 ? 1 : month + 1;
+        const endYear = month === 12 ? year + 1 : year;
+        const endDate = `${endYear}-${String(endMonth).padStart(2, "0")}-01`;
+
+        const records = await ManagerAttendance.find({
+            manager: managerId,
+            date: { $gte: startDate, $lt: endDate },
+        }).sort({ date: 1 });
+
+        const policy = await AttendancePolicy.findOne();
+        const holidays = policy
+            ? policy.holidays.filter((h) => h.date >= startDate && h.date < endDate)
+            : [];
+
+        const leaves = await ManagerLeave.find({
+            manager: managerId,
+            status: "approved",
+            startDate: { $lte: endDate },
+            endDate: { $gte: startDate },
+        });
+
+        res.json({ manager, records, holidays, leaves, weeklyOffDays: policy?.weeklyOffDays || [0, 6], weekendExceptions: policy?.weekendExceptions || [] });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -192,28 +242,53 @@ const reviewCorrection = async (req, res) => {
         await correction.save();
 
         if (status === "approved") {
-            const attendance = await ManagerAttendance.findById(correction.attendance);
-            if (attendance) {
-                if (correction.requestedCheckIn) {
-                    attendance.checkIn = {
-                        ...attendance.checkIn,
-                        time: correction.requestedCheckIn,
-                    };
+            let attendance = correction.attendance
+                ? await ManagerAttendance.findById(correction.attendance)
+                : await ManagerAttendance.findOne({ manager: correction.manager._id, date: correction.date });
+
+            if (!attendance) {
+                attendance = new ManagerAttendance({
+                    manager: correction.manager._id,
+                    date: correction.date,
+                    status: "present",
+                    workMode: "WFO",
+                });
+            }
+
+            // Assign the time directly (don't spread the Mongoose subdoc — that leaks
+            // internal props and breaks casting of nested fields like checkIn.photo).
+            if (correction.requestedCheckIn) {
+                if (attendance.checkIn) attendance.checkIn.time = correction.requestedCheckIn;
+                else attendance.checkIn = { time: correction.requestedCheckIn };
+            }
+            if (correction.requestedCheckOut) {
+                if (attendance.checkOut) attendance.checkOut.time = correction.requestedCheckOut;
+                else attendance.checkOut = { time: correction.requestedCheckOut };
+            }
+
+            // Recalculate working hours + status when we have a full check-in/out span.
+            if (attendance.checkIn?.time && attendance.checkOut?.time) {
+                const diffMs =
+                    new Date(attendance.checkOut.time) - new Date(attendance.checkIn.time);
+                attendance.workingHours =
+                    Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
+                const policy = await AttendancePolicy.findOne();
+                if (policy && attendance.workingHours < policy.workingHoursPerDay / 2) {
+                    attendance.status = "half-day";
+                } else if (!["leave", "holiday"].includes(attendance.status)) {
+                    attendance.status = "present";
                 }
-                if (correction.requestedCheckOut) {
-                    attendance.checkOut = {
-                        ...attendance.checkOut,
-                        time: correction.requestedCheckOut,
-                    };
-                }
-                if (attendance.checkIn?.time && attendance.checkOut?.time) {
-                    const diffMs =
-                        new Date(attendance.checkOut.time) - new Date(attendance.checkIn.time);
-                    attendance.workingHours =
-                        Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
-                }
-                attendance.approvalStatus = "approved";
-                await attendance.save();
+            } else if (attendance.checkIn?.time && !["leave", "holiday"].includes(attendance.status)) {
+                attendance.status = "present";
+            }
+
+            attendance.approvalStatus = "approved";
+            await attendance.save();
+
+            // Backfill the link for absent-day corrections that had no record at submit time.
+            if (!correction.attendance) {
+                correction.attendance = attendance._id;
+                await correction.save();
             }
         }
 
@@ -315,6 +390,7 @@ const reviewLeave = async (req, res) => {
 module.exports = {
     getManagersAttendance,
     getManagersSummary,
+    getManagerCalendar,
     approveAttendance,
     getCorrectionRequests,
     reviewCorrection,

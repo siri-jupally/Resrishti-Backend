@@ -28,6 +28,7 @@ const {
 const {
     getManagersAttendance,
     getManagersSummary,
+    getManagerCalendar,
     approveAttendance: approveManagerAttendance,
     getCorrectionRequests: getManagerCorrections,
     reviewCorrection: reviewManagerCorrection,
@@ -87,6 +88,7 @@ router.get('/org/overview', protect, getOrgOverview);
 // Manager attendance oversight
 router.get('/manager-attendance/team', protect, getManagersAttendance);
 router.get('/manager-attendance/team/summary', protect, getManagersSummary);
+router.get('/manager-attendance/manager/:managerId/calendar', protect, getManagerCalendar);
 router.patch('/manager-attendance/:id/approve', protect, approveManagerAttendance);
 router.get('/manager-attendance/corrections', protect, getManagerCorrections);
 router.patch('/manager-attendance/corrections/:id', protect, reviewManagerCorrection);

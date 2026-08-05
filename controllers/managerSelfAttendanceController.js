@@ -23,6 +23,7 @@ const Admin = require("../models/Admin");
 const multer = require("multer");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { uploadCheckinPhoto } = require("../utils/s3");
+const { isWeekOff } = require("../utils/attendanceDays");
 
 // Live camera capture only — see attendanceController for the same pattern.
 const checkInUpload = multer({
@@ -191,6 +192,7 @@ const checkIn = async (req, res) => {
             existing.status = "present";
             existing.approvalStatus = locationWithinBoundary === false ? "pending" : "auto-approved";
             existing.isLateCheckIn = isLateCheckIn;
+            existing.isWeekendWork = isWeekOff(today, policy);
             existing.locationWithinBoundary = locationWithinBoundary;
             if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
             await existing.save();
@@ -205,6 +207,7 @@ const checkIn = async (req, res) => {
             status: "present",
             approvalStatus: locationWithinBoundary === false ? "pending" : "auto-approved",
             isLateCheckIn,
+            isWeekendWork: isWeekOff(today, policy),
             locationWithinBoundary,
             wfhTaskSummary: wfhTaskSummary || undefined,
         });
@@ -280,8 +283,12 @@ const checkOut = async (req, res) => {
             }
         }
 
-        if (policy && attendance.workingHours < policy.workingHoursPerDay / 2) {
-            attendance.status = "half-day";
+        // Use the explicit halfDayThresholdHours, not workingHoursPerDay / 2 —
+        // see employee attendanceController.js for the bug history. Flip back
+        // to "present" when above threshold so corrections clear stale half-days.
+        if (policy && attendance.status !== "leave" && attendance.status !== "holiday" && attendance.status !== "weekend") {
+            const threshold = policy.halfDayThresholdHours || 4;
+            attendance.status = attendance.workingHours < threshold ? "half-day" : "present";
         }
 
         if (wfhTaskSummary) {
@@ -338,7 +345,7 @@ const getCalendar = async (req, res) => {
             endDate: { $gte: startDate },
         });
 
-        res.json({ records, holidays, leaves });
+        res.json({ records, holidays, leaves, weeklyOffDays: policy?.weeklyOffDays || [0, 6], weekendExceptions: policy?.weekendExceptions || [] });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -347,28 +354,59 @@ const getCalendar = async (req, res) => {
 // POST /api/manager/self-attendance/correction
 const submitCorrection = async (req, res) => {
     try {
-        const { attendanceId, requestedCheckIn, requestedCheckOut, reason } = req.body;
-        if (!attendanceId || !reason) {
-            return res.status(400).json({ message: "attendanceId and reason are required" });
+        const { attendanceId, date, correctionType, requestedCheckIn, requestedCheckOut, reason } = req.body;
+        if (!reason) {
+            return res.status(400).json({ message: "reason is required" });
         }
 
-        const attendance = await ManagerAttendance.findById(attendanceId);
+        // Resolve the target date. Managers can now file a correction for ANY date in the
+        // current month — including absent days that have no ManagerAttendance record yet.
+        // A legacy `attendanceId` reference is still accepted for backward compatibility.
+        let attendance = null;
+        let targetDate = date;
+
+        if (attendanceId) {
+            attendance = await ManagerAttendance.findById(attendanceId);
+            if (!attendance) {
+                return res.status(404).json({ message: "Attendance record not found" });
+            }
+            if (String(attendance.manager) !== String(req.manager._id)) {
+                return res.status(403).json({ message: "Not authorized" });
+            }
+            targetDate = attendance.date;
+        }
+
+        if (!targetDate || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+            return res.status(400).json({ message: "A valid date is required" });
+        }
+
+        // Validation: allowed window is current + previous month, no future dates.
+        // Mirrors the employee flow (attendanceController.js).
+        const now = new Date();
+        const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const windowStart = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, "0")}-01`;
+        if (targetDate < windowStart) {
+            return res.status(400).json({ message: "Corrections are only allowed for the current or previous month" });
+        }
+        if (targetDate > todayStr) {
+            return res.status(400).json({ message: "Cannot submit a correction for a future date" });
+        }
+
+        // Link an existing record for this date if one exists (absent days have none).
         if (!attendance) {
-            return res.status(404).json({ message: "Attendance record not found" });
-        }
-        if (String(attendance.manager) !== String(req.manager._id)) {
-            return res.status(403).json({ message: "Not authorized" });
+            attendance = await ManagerAttendance.findOne({ manager: req.manager._id, date: targetDate });
         }
 
-        // Parse the requested times. The frontend now sends a full ISO timestamp built
-        // from the attendance date + picked HH:MM in the user's local timezone, so the
-        // instant is unambiguous. A bare "HH:MM" string is still accepted as a fallback
-        // (interpreted on the attendance date in the server's local timezone).
+        // Parse the requested times. The frontend sends a full ISO timestamp built from
+        // the target date + picked HH:MM in the user's local timezone, so the instant is
+        // unambiguous. A bare "HH:MM" string is still accepted as a fallback (interpreted
+        // on the target date in the server's local timezone).
         const parseTimeValue = (val) => {
             if (!val) return undefined;
             if (typeof val === "string" && /^\d{1,2}:\d{2}(:\d{2})?$/.test(val)) {
                 const [h, m] = val.split(":").map(Number);
-                const d = new Date(attendance.date + "T00:00:00");
+                const d = new Date(targetDate + "T00:00:00");
                 d.setHours(h, m, 0, 0);
                 return d;
             }
@@ -380,8 +418,9 @@ const submitCorrection = async (req, res) => {
 
         const correction = await ManagerCorrectionRequest.create({
             manager: req.manager._id,
-            attendance: attendanceId,
-            date: attendance.date,
+            attendance: attendance ? attendance._id : undefined,
+            date: targetDate,
+            correctionType: correctionType || "incorrect-data",
             requestedCheckIn: parsedCheckIn || undefined,
             requestedCheckOut: parsedCheckOut || undefined,
             reason,
@@ -389,7 +428,7 @@ const submitCorrection = async (req, res) => {
 
         await notifyAdmins("attendance", {
             title: "Attendance Correction Request (Manager)",
-            body: `${req.manager.name} submitted a correction for ${attendance.date}`,
+            body: `${req.manager.name} submitted a correction for ${targetDate}`,
             icon: "/android-chrome-512x512.png",
             data: { url: "/admin/dashboard?tab=managerAttendance" },
         });

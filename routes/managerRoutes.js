@@ -31,6 +31,7 @@ const { getTaskPolicy } = require("../controllers/taskPolicyController");
 const {
   getTeamAttendance,
   getTeamSummary,
+  getEmployeeCalendar,
   approveAttendance,
   setEmployeeWorkMode,
   getCorrectionRequests,
@@ -74,6 +75,7 @@ router.post(
 // Attendance routes
 router.get("/attendance/team", protectManager, getTeamAttendance);
 router.get("/attendance/team/summary", protectManager, getTeamSummary);
+router.get("/attendance/employee/:employeeId/calendar", protectManager, getEmployeeCalendar);
 router.patch("/attendance/:id/approve", protectManager, approveAttendance);
 router.patch("/employees/:id/workmode", protectManager, setEmployeeWorkMode);
 router.get("/attendance/corrections", protectManager, getCorrectionRequests);

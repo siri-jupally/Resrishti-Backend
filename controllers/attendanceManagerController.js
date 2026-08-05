@@ -13,16 +13,22 @@
     - reviewLeave: PATCH /api/manager/leaves/:id
 */
 const Attendance = require("../models/Attendance");
+const AttendancePolicy = require("../models/AttendancePolicy");
 const CorrectionRequest = require("../models/CorrectionRequest");
 const Leave = require("../models/Leave");
 const Employee = require("../models/Employee");
 const Admin = require("../models/Admin");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
+const { isWeekOff } = require("../utils/attendanceDays");
 
 // GET /api/manager/attendance/team?date=YYYY-MM-DD
 const getTeamAttendance = async (req, res) => {
     try {
         const date = req.query.date || new Date().toISOString().split("T")[0];
+
+        // Is this a weekly-off day? If so, missing records are "weekend", not "absent".
+        const policy = await AttendancePolicy.findOne();
+        const dayIsOff = isWeekOff(date, policy);
 
         // Get all employees under this manager
         const employees = await Employee.find({ manager: req.manager._id }).select(
@@ -42,7 +48,8 @@ const getTeamAttendance = async (req, res) => {
             recordMap[String(r.employee._id)] = r;
         });
 
-        // Build team data with absent employees too
+        // Build team data; people without a record are absent on working days, or
+        // "weekend" on a configured weekly-off day.
         const teamData = employees.map((emp) => {
             const record = recordMap[String(emp._id)];
             return {
@@ -54,25 +61,27 @@ const getTeamAttendance = async (req, res) => {
                 },
                 attendance: record || {
                     date,
-                    status: "absent",
+                    status: dayIsOff ? "weekend" : "absent",
                     approvalStatus: null,
                 },
             };
         });
 
-        // Summary counts
+        // Summary counts. On a weekly-off day nobody is "absent".
         const summary = {
             total: employees.length,
             present: records.filter((r) => r.status === "present").length,
-            absent:
-                employees.length -
-                records.filter((r) =>
-                    ["present", "half-day", "leave", "holiday", "weekend"].includes(r.status)
-                ).length,
+            absent: dayIsOff
+                ? 0
+                : employees.length -
+                  records.filter((r) =>
+                      ["present", "half-day", "leave", "holiday", "weekend"].includes(r.status)
+                  ).length,
             wfh: records.filter((r) => r.workMode === "WFH").length,
             leave: records.filter((r) => r.status === "leave").length,
             late: records.filter((r) => r.isLateCheckIn).length,
             outOfBoundary: records.filter((r) => r.locationWithinBoundary === false).length,
+            isWeekOff: dayIsOff,
         };
 
         res.json({ date, team: teamData, summary });
@@ -120,6 +129,52 @@ const getTeamSummary = async (req, res) => {
         });
 
         res.json({ month, year, summaries: empSummaries });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// GET /api/manager/attendance/employee/:employeeId/calendar?month=3&year=2026
+// Monthly attendance calendar for a specific employee reporting to this manager.
+const getEmployeeCalendar = async (req, res) => {
+    try {
+        const { employeeId } = req.params;
+
+        // Verify the employee reports to the requesting manager.
+        const employee = await Employee.findOne({
+            _id: employeeId,
+            manager: req.manager._id,
+        }).select("name email defaultWorkMode");
+        if (!employee) {
+            return res.status(404).json({ message: "Employee not found in your team" });
+        }
+
+        const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+
+        const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
+        const endMonth = month === 12 ? 1 : month + 1;
+        const endYear = month === 12 ? year + 1 : year;
+        const endDate = `${endYear}-${String(endMonth).padStart(2, "0")}-01`;
+
+        const records = await Attendance.find({
+            employee: employeeId,
+            date: { $gte: startDate, $lt: endDate },
+        }).sort({ date: 1 });
+
+        const policy = await AttendancePolicy.findOne();
+        const holidays = policy
+            ? policy.holidays.filter((h) => h.date >= startDate && h.date < endDate)
+            : [];
+
+        const leaves = await Leave.find({
+            employee: employeeId,
+            status: "approved",
+            startDate: { $lte: endDate },
+            endDate: { $gte: startDate },
+        });
+
+        res.json({ employee, records, holidays, leaves, weeklyOffDays: policy?.weeklyOffDays || [0, 6], weekendExceptions: policy?.weekendExceptions || [] });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -256,31 +311,57 @@ const reviewCorrection = async (req, res) => {
         if (reviewRemarks) correction.reviewRemarks = reviewRemarks;
         await correction.save();
 
-        // If approved, update the attendance record
+        // If approved, apply the correction to the attendance record. For absent days
+        // there is no record yet, so we create one (so corrections for unmarked days are
+        // stored and reflected correctly).
         if (status === "approved") {
-            const attendance = await Attendance.findById(correction.attendance);
-            if (attendance) {
-                if (correction.requestedCheckIn) {
-                    attendance.checkIn = {
-                        ...attendance.checkIn,
-                        time: correction.requestedCheckIn,
-                    };
+            let attendance = correction.attendance
+                ? await Attendance.findById(correction.attendance)
+                : await Attendance.findOne({ employee: correction.employee._id, date: correction.date });
+
+            if (!attendance) {
+                attendance = new Attendance({
+                    employee: correction.employee._id,
+                    date: correction.date,
+                    status: "present",
+                    workMode: "WFO",
+                });
+            }
+
+            // Assign the time directly (don't spread the Mongoose subdoc — that leaks
+            // internal props and breaks casting of nested fields like checkIn.photo).
+            if (correction.requestedCheckIn) {
+                if (attendance.checkIn) attendance.checkIn.time = correction.requestedCheckIn;
+                else attendance.checkIn = { time: correction.requestedCheckIn };
+            }
+            if (correction.requestedCheckOut) {
+                if (attendance.checkOut) attendance.checkOut.time = correction.requestedCheckOut;
+                else attendance.checkOut = { time: correction.requestedCheckOut };
+            }
+
+            // Recalculate working hours + status when we have a full check-in/out span.
+            if (attendance.checkIn?.time && attendance.checkOut?.time) {
+                const diffMs =
+                    new Date(attendance.checkOut.time) - new Date(attendance.checkIn.time);
+                attendance.workingHours =
+                    Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
+                const policy = await AttendancePolicy.findOne();
+                if (policy && attendance.workingHours < policy.workingHoursPerDay / 2) {
+                    attendance.status = "half-day";
+                } else if (!["leave", "holiday"].includes(attendance.status)) {
+                    attendance.status = "present";
                 }
-                if (correction.requestedCheckOut) {
-                    attendance.checkOut = {
-                        ...attendance.checkOut,
-                        time: correction.requestedCheckOut,
-                    };
-                }
-                // Recalculate working hours
-                if (attendance.checkIn?.time && attendance.checkOut?.time) {
-                    const diffMs =
-                        new Date(attendance.checkOut.time) - new Date(attendance.checkIn.time);
-                    attendance.workingHours =
-                        Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
-                }
-                attendance.approvalStatus = "approved";
-                await attendance.save();
+            } else if (attendance.checkIn?.time && !["leave", "holiday"].includes(attendance.status)) {
+                attendance.status = "present";
+            }
+
+            attendance.approvalStatus = "approved";
+            await attendance.save();
+
+            // Backfill the link for absent-day corrections that had no record at submit time.
+            if (!correction.attendance) {
+                correction.attendance = attendance._id;
+                await correction.save();
             }
         }
 
@@ -409,6 +490,7 @@ const reviewLeave = async (req, res) => {
 module.exports = {
     getTeamAttendance,
     getTeamSummary,
+    getEmployeeCalendar,
     approveAttendance,
     setEmployeeWorkMode,
     getCorrectionRequests,

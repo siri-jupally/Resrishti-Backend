@@ -14,12 +14,18 @@ const correctionRequestSchema = new mongoose.Schema(
             ref: "Employee",
             required: true,
         },
+        // Optional: absent days have no Attendance record yet, so a correction can be
+        // filed against a bare date. The record is created/linked on approval.
         attendance: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Attendance",
-            required: true,
         },
         date: { type: String, required: true }, // YYYY-MM-DD
+        correctionType: {
+            type: String,
+            enum: ["missing-checkin", "missing-checkout", "absence", "incorrect-data"],
+            default: "incorrect-data",
+        },
         requestedCheckIn: { type: Date },
         requestedCheckOut: { type: Date },
         reason: { type: String, required: true },
