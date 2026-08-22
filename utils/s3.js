@@ -16,6 +16,10 @@
   - Uploads use keys like: tasks/<taskId>/<timestamp>-<safeFileName>
 */
 
+// Used to make pickup-evidence object keys collision-proof when several
+// photos upload concurrently for one status change.
+const crypto = require("crypto");
+
 const {
   S3Client,
   PutObjectCommand,
@@ -153,21 +157,31 @@ const uploadCheckinPhoto = async ({ role, userId, buffer, contentType }) => {
 
 /**
  * Upload a pickup-evidence photo. Object key is namespaced under
- * `pickup-evidence/<pickupID>/<status>-<timestamp>.jpg` so the bucket lifecycle
- * rule can target the prefix `pickup-evidence/` for 30-day expiration.
+ * `pickup-evidence/<pickupID>/<status>-<timestamp>-<nonce>.jpg` so the bucket
+ * lifecycle rule can target the prefix `pickup-evidence/` for 30-day expiration.
+ *
+ * The `<nonce>` matters: a status change can now carry several photos, and
+ * they upload concurrently. Keyed on `Date.now()` alone, two images captured
+ * in the same millisecond would produce identical keys and the second PUT
+ * would silently overwrite the first — losing evidence with no error anywhere.
  *
  * @param {Object} params
  * @param {string} params.pickupID - Human-friendly pickup ID (e.g. PU-20260512-A7F2).
  * @param {string} params.status - Status this evidence captures (en-route, at-client, etc.).
  * @param {Buffer} params.buffer
  * @param {string} [params.contentType="image/jpeg"]
+ * @param {number} [params.index=0] - Position within a multi-photo capture; keeps
+ *        keys ordered and human-readable when listing the prefix.
  * @returns {Promise<{bucket: string, key: string}>}
  */
-const uploadPickupEvidence = async ({ pickupID, status, buffer, contentType }) => {
+const uploadPickupEvidence = async ({ pickupID, status, buffer, contentType, index = 0 }) => {
     const bucket = process.env.S3_BUCKET_NAME;
     if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 
-    const key = `pickup-evidence/${pickupID}/${status}-${Date.now()}.jpg`;
+    // 6 hex chars of randomness — collision-proof even if two supervisors
+    // somehow advance the same pickup in the same millisecond.
+    const nonce = crypto.randomBytes(3).toString("hex");
+    const key = `pickup-evidence/${pickupID}/${status}-${Date.now()}-${index}-${nonce}.jpg`;
     const client = getS3Client();
     await client.send(
         new PutObjectCommand({

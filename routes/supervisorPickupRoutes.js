@@ -15,7 +15,8 @@
 
   Routes returned by each factory call:
   - GET    /                 → listMyPickups (mine, by supervisor.userId)
-  - PATCH  /:id/status       → updatePickupStatus (multipart 'photo' field)
+  - PATCH  /:id/status       → updatePickupStatus (multipart 'photos[]' field,
+                               up to MAX_EVIDENCE_PHOTOS images per change)
   - POST   /:id/waste-data   → recordWasteData (multipart 'weighbridgePhoto'
                                optional; advances weighed → processed →
                                cert-draft and creates the draft Certificate).
@@ -32,9 +33,11 @@ const ctrl = require("../controllers/supervisorPickupController");
 const factory = (roleAuth) => {
     const r = express.Router();
     r.get("/", roleAuth, ctrl.listMyPickups);
-    // The multer middleware (ctrl.upload) parses the multipart form before
-    // updatePickupStatus runs. Photo field name must be 'photo'.
-    r.patch("/:id/status", roleAuth, ctrl.upload, ctrl.updatePickupStatus);
+    // ctrl.uploadEvidence parses the multipart form before updatePickupStatus
+    // runs, and converts multer failures (too many files, oversized image,
+    // wrong MIME) into readable 400s. Accepts `photos[]` — one or many — plus
+    // the legacy single `photo` field from older installed app builds.
+    r.patch("/:id/status", roleAuth, ctrl.uploadEvidence, ctrl.updatePickupStatus);
     // Waste-data submission. Multer parses multipart and optionally lifts a
     // file off the `weighbridgePhoto` field. lineItems arrives as a JSON
     // string in req.body (multipart can't carry arrays natively).

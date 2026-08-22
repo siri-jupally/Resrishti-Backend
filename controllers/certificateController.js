@@ -47,7 +47,6 @@ const { notifyIfEnabled } = require("../utils/push");
 const { getIo } = require("../socketHandler");
 
 const { GetObjectCommand } = require("@aws-sdk/client-s3");
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 // Friendly display labels for streams. Kept in sync with utils/certificatePdf.js
 // and Pickup.wasteLineItemSchema.stream. If you add a stream here, mirror it in
@@ -65,11 +64,6 @@ const STREAM_LABELS = {
     hazardous: "Hazardous Waste",
     other: "Other",
 };
-
-// Presigned URL expiry — 7 days is the S3 hard cap for SigV4. The cert email's
-// portal link is the durable fallback; the presigned URL is the "click here to
-// download instantly" path.
-const PRESIGN_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
 
 // ---------- helpers ----------------------------------------------------
 
@@ -144,8 +138,13 @@ const fetchS3Buffer = async (bucket, key) => {
  * Compose the cert-delivery email body. Mirrors the emerald-on-white branded
  * layout from controllers/onboardingController.js so the two transactional
  * emails feel like one product.
+ *
+ * Deliberately contains NO presigned S3 URL. Such a link leaks the bucket name,
+ * region and access-key ID in plain sight, and stays live for its full 7-day
+ * expiry for anyone the mail is forwarded to. The client gets the PDF as an
+ * attachment and the portal link for the durable copy.
  */
-const buildCertEmail = (cert, client, pickup, presignedUrl) => {
+const buildCertEmail = (cert, client, pickup) => {
     const certNumber = cert.certNumber || "—";
     const revision = Number(cert.revision || 1);
     const revLine = revision > 1 ? ` (Rev ${revision})` : "";
@@ -170,13 +169,10 @@ const buildCertEmail = (cert, client, pickup, presignedUrl) => {
         `Date: ${fmtDate(scheduled)}`,
         `Total processed: ${fmtKg(totalKg)} kg`,
         ``,
-        `Download the PDF directly:`,
-        presignedUrl || "(see attachment)",
+        `The certificate PDF is attached to this email.`,
         ``,
-        `Or view it in your portal:`,
+        `You can also view and download it any time from your portal:`,
         portalUrl,
-        ``,
-        `The PDF is also attached to this email.`,
         ``,
         `— The Resrishti Team`,
     ].join("\n");
@@ -251,17 +247,8 @@ const buildCertEmail = (cert, client, pickup, presignedUrl) => {
                   <a href="${portalUrl}" style="display:inline-block;background:#059669;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 28px;border-radius:8px;">View in Portal</a>
                 </p>
 
-                ${
-                    presignedUrl
-                        ? `<p style="margin:16px 0 0;font-size:12px;line-height:1.6;color:#94a3b8;word-break:break-all;text-align:center;">
-                  Or download directly (link valid for 7 days):<br/>
-                  <a href="${presignedUrl}" style="color:#059669;">${presignedUrl}</a>
-                </p>`
-                        : ""
-                }
-
                 <p style="margin:24px 0 0;font-size:12px;color:#64748b;">
-                  The PDF is also attached to this email for your records. Keep it on file for compliance and audit purposes.
+                  The PDF is attached to this email for your records. Keep it on file for compliance and audit purposes.
                 </p>
               </td>
             </tr>
@@ -519,9 +506,9 @@ const issueCertificate = async (req, res) => {
  * - Cert must be 'issued' OR already 'sent' (idempotent re-send).
  * - Optional `confirmEmail` typo-guard (clientmngmt.md §17 Q11). If provided
  *   and doesn't match client.contactEmail exactly → 400.
- * - Re-fetches the PDF from S3, generates a 7-day presigned URL, sends
- *   email with the PDF attachment + presigned URL + portal link, push-notifies
- *   the client, and emits a socket event.
+ * - Re-fetches the PDF from S3 and sends the email with the PDF attachment +
+ *   portal link (no presigned S3 URL — see buildCertEmail), push-notifies the
+ *   client, and emits a socket event.
  * - Flips cert.status='sent', stamps sentAt/sentBy.
  * - Flips linked pickup.status='cert-sent' and appends evidence.
  */
@@ -570,25 +557,9 @@ const sendCertificate = async (req, res) => {
             }
         }
 
-        // Presigned URL — 7-day expiry. Reused by the email AND the portal
-        // download endpoint (Backend I) when the client clicks "Download PDF".
-        let presignedUrl = null;
-        try {
-            const s3 = getS3Client();
-            const cmd = new GetObjectCommand({
-                Bucket: cert.pdf.bucket,
-                Key: cert.pdf.key,
-            });
-            presignedUrl = await getSignedUrl(s3, cmd, {
-                expiresIn: PRESIGN_EXPIRY_SECONDS,
-            });
-        } catch (signErr) {
-            // Non-fatal — the email can still include the PDF as an attachment.
-            console.error("Presign error:", signErr.message || signErr);
-        }
-
-        // Re-fetch the PDF buffer for the email attachment. If S3 fetch fails,
-        // we still send the email with just the presigned URL as a fallback.
+        // Re-fetch the PDF buffer for the email attachment. If the S3 fetch
+        // fails the email still goes out, carrying the portal link — the client
+        // can always download from there.
         const pdfBuffer = await fetchS3Buffer(cert.pdf.bucket, cert.pdf.key);
         const attachments = pdfBuffer
             ? [
@@ -600,12 +571,7 @@ const sendCertificate = async (req, res) => {
               ]
             : undefined;
 
-        const { subject, text, html } = buildCertEmail(
-            cert,
-            client,
-            pickup,
-            presignedUrl
-        );
+        const { subject, text, html } = buildCertEmail(cert, client, pickup);
 
         try {
             await sendEmail(

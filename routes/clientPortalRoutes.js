@@ -29,9 +29,26 @@ const {
   getDashboard,
   listMyCertificates,
   downloadMyCertificate,
+  listMyReports,
+  downloadMyReport,
+  listMySites,
 } = require("../controllers/clientPortalController");
+const {
+  forgotPassword,
+  verifyResetToken,
+  resetPassword,
+} = require("../controllers/clientPasswordResetController");
 
 router.post("/login", loginClient);
+
+// Forgot / reset password — PUBLIC by definition (the caller has no session).
+// Declared before the protectClient routes below so the middleware ordering
+// stays obvious. `forgot-password` is rate-limited centrally in server.js
+// alongside the login endpoints.
+router.post("/forgot-password", forgotPassword);
+router.get("/reset-password/:token", verifyResetToken);
+router.post("/reset-password", resetPassword);
+
 router.get("/me", protectClient, getMe);
 
 // Chunk 3 (Backend I) — dashboard KPIs + certificate list + presigned download.
@@ -39,5 +56,13 @@ router.get("/me", protectClient, getMe);
 router.get("/dashboard", protectClient, getDashboard);
 router.get("/certificates", protectClient, listMyCertificates);
 router.get("/certificates/:id/download", protectClient, downloadMyCertificate);
+
+// Monthly reports (Environmental Impact + GHG). Only 'sent'/'superseded' are
+// ever returned — see CLIENT_VISIBLE_REPORT_STATUSES in the controller.
+router.get("/reports", protectClient, listMyReports);
+router.get("/reports/:id/download", protectClient, downloadMyReport);
+
+// The client's own buildings, for tagging a pickup request to a site.
+router.get("/sites", protectClient, listMySites);
 
 module.exports = router;

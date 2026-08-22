@@ -18,6 +18,7 @@
 */
 const mongoose = require("mongoose");
 const Client = require("../models/Client");
+const OnboardingToken = require("../models/OnboardingToken");
 const { issueOnboardingToken } = require("./onboardingController");
 
 // ==================== CREATE ====================
@@ -247,7 +248,63 @@ const deleteClient = async (req, res) => {
         client.status = "churned";
         await client.save();
 
+        // Kill any outstanding onboarding invite. Without this, a client
+        // archived before they onboarded could still click the link sitting in
+        // their inbox — completeOnboarding sets status='active', which would
+        // silently undo the archive with no admin action. Force-expire rather
+        // than delete, matching resendOnboarding, so an in-flight /verify sees
+        // 410 (expired) instead of 404 (missing) and the TTL index still cleans up.
+        await OnboardingToken.updateMany(
+            { client: client._id, usedAt: null },
+            { expiresAt: new Date() }
+        );
+
         return res.json({ ok: true });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// ==================== RESTORE (undo archive) ====================
+
+// POST /api/admin/clients/:id/restore  — reverses deleteClient.
+//
+// A dedicated endpoint rather than PATCH { status: 'active' }, because the
+// correct target status is NOT always 'active': a client archived before they
+// ever completed onboarding has no password, so restoring them to 'active'
+// would leave an account that reads as live but can never be signed into.
+// Those go back to 'pending-onboarding' so the admin's next step (resend the
+// invite) is the obvious one.
+const restoreClient = async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid client id" });
+        }
+
+        const client = await Client.findById(req.params.id);
+        if (!client) {
+            return res.status(404).json({ message: "Client not found" });
+        }
+
+        // Only an archived client can be restored. Guarding here keeps this
+        // from becoming a backdoor for flipping a 'paused' client to active
+        // without going through the normal update path.
+        if (client.status !== "churned") {
+            return res.status(409).json({
+                message: `Only an archived client can be restored (current status: '${client.status}')`,
+            });
+        }
+
+        client.status = client.isOnboardingComplete
+            ? "active"
+            : "pending-onboarding";
+        await client.save();
+
+        const fresh = await Client.findById(client._id)
+            .select("-passwordHash")
+            .populate("accountManager", "name email");
+
+        return res.json({ ok: true, client: fresh, status: fresh.status });
     } catch (err) {
         return res.status(500).json({ message: err.message });
     }
@@ -259,4 +316,5 @@ module.exports = {
     getClient,
     updateClient,
     deleteClient,
+    restoreClient,
 };

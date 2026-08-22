@@ -283,6 +283,16 @@ const completeOnboarding = async (req, res) => {
             return res.status(404).json({ message: "Invalid token" });
         }
 
+        // Only a client still awaiting onboarding may complete it. Guards the
+        // case where the admin archived (or paused) the client after the invite
+        // was sent — without this, finishing onboarding would flip status back
+        // to 'active' and undo the admin's action. deleteClient force-expires
+        // outstanding tokens too; this covers tokens issued before that existed.
+        // 410 (not 403) so the portal's existing dead-link handling applies.
+        if (client.status !== "pending-onboarding") {
+            return res.status(410).json({ message: "Link expired" });
+        }
+
         // Pre-save hook (Client model) hashes the plain value.
         client.passwordHash = cleaned;
         client.status = "active";

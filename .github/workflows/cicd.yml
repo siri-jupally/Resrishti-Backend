@@ -41,9 +41,9 @@ jobs:
             -e JWT_SECRET='${{ secrets.JWT_SECRET }}' \
             -e SMTP_HOST='smtp.gmail.com' \
             -e SMTP_PORT='587' \
-            -e SMTP_USER='siri21.jupally@gmail.com' \
+            -e SMTP_USER='resrishti.info@gmail.com' \
             -e SMTP_PASS='${{ secrets.SMTP_PASS }}' \
-            -e FROM_EMAIL='siri21.jupally@gmail.com' \
+            -e FROM_EMAIL='resrishti.info@gmail.com' \
             -e CLIENT_URL='http://localhost:5173' \
             -e SERVER_URL='http://localhost:5000' \
             -e NODE_ENV='production' \

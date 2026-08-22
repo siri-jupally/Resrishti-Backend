@@ -13,5 +13,8 @@ router.get("/", protect, c.listClients);
 router.get("/:id", protect, c.getClient);
 router.patch("/:id", protect, c.updateClient);
 router.delete("/:id", protect, c.deleteClient);
+// Undo an archive. Restores to 'active', or 'pending-onboarding' if the
+// client never finished onboarding — see restoreClient.
+router.post("/:id/restore", protect, c.restoreClient);
 
 module.exports = router;

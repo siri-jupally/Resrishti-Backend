@@ -31,11 +31,20 @@ const jwt = require("jsonwebtoken");
 const { GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
+const mongoose = require("mongoose");
 const Client = require("../models/Client");
 const Pickup = require("../models/Pickup");
 const Certificate = require("../models/Certificate");
+const Report = require("../models/Report");
+const Site = require("../models/Site");
 const { getS3Client } = require("../utils/s3");
 const { co2eForLineItems } = require("../utils/emissionFactors");
+
+// The only certificate statuses an external client may ever see or download.
+// `draft` = not rendered yet; `issued` = PDF exists but the manager has NOT
+// pressed Send, so it is still internal. Both list + download read this, so a
+// status can never be visible in one path and blocked in the other.
+const CLIENT_VISIBLE_CERT_STATUSES = ["sent", "superseded"];
 
 // 7-day expiry mirrors clientmngmt.md §10.3.
 const generateClientToken = (id) =>
@@ -67,6 +76,17 @@ const loginClient = async (req, res) => {
       return res.status(403).json({
         message:
           "Onboarding not complete. Use the link in your welcome email.",
+      });
+    }
+
+    // Mirror the account-state guard in middleware/authClient. Without it a
+    // paused/churned client logs in successfully, then gets 403 'Account
+    // inactive' on every subsequent portal request — a dead portal with no
+    // explanation. Fail here instead, where we can say why.
+    if (client.status !== "active") {
+      return res.status(403).json({
+        message:
+          "This account is not active. Please contact your account manager.",
       });
     }
 
@@ -175,9 +195,13 @@ const getDashboard = async (req, res) => {
 // GET /api/client/certificates?status=&limit=&offset=
 //
 // Lists the certificates owned by the logged-in client. Filters:
-//   - Only `issued`, `sent`, `superseded` are user-facing. Drafts are
-//     manager-only (still under review) — we hard-filter them out even if
-//     the caller passes ?status=draft.
+//   - Only `sent` and `superseded` are user-facing. `draft` AND `issued` are
+//     manager-only: issuing renders the PDF but the cert is still under
+//     manager review until they explicitly hit Send (clientmngmt.md §8.2,
+//     §11.5). We hard-filter both out even if the caller passes ?status=issued.
+//   - `superseded` stays visible because it is only reachable from `sent`
+//     (see reviseCertificate's status guard), so the client already has it —
+//     hiding it would make previously-delivered certs vanish from their history.
 //   - Optional ?status=sent narrows further within the visible set.
 //
 // Pagination:
@@ -190,9 +214,10 @@ const listMyCertificates = async (req, res) => {
   try {
     const clientId = req.client._id;
 
-    // User-facing statuses only. Drafts are excluded at the query level so
-    // a malicious ?status=draft can't leak them.
-    const visibleStatuses = ["issued", "sent", "superseded"];
+    // User-facing statuses only. Drafts and issued-but-unsent are excluded at
+    // the query level so a malicious ?status=draft / ?status=issued can't leak
+    // them. Keep in sync with CLIENT_VISIBLE_CERT_STATUSES below.
+    const visibleStatuses = CLIENT_VISIBLE_CERT_STATUSES;
     let statusFilter = { $in: visibleStatuses };
     if (req.query.status && visibleStatuses.includes(req.query.status)) {
       statusFilter = req.query.status;
@@ -252,6 +277,15 @@ const downloadMyCertificate = async (req, res) => {
       return res.status(404).json({ message: "Certificate not found" });
     }
 
+    // Ownership alone is NOT enough: a draft or issued-but-unsent cert belongs
+    // to this client but is still under manager review. Without this guard a
+    // client who learned an id (e.g. from a socket event or an earlier build
+    // that listed issued certs) could pull the PDF before it was ever sent.
+    // Same 404 as above so the endpoint never confirms the cert exists.
+    if (!CLIENT_VISIBLE_CERT_STATUSES.includes(cert.status)) {
+      return res.status(404).json({ message: "Certificate not found" });
+    }
+
     if (!cert.pdf || !cert.pdf.key) {
       // Either a draft (no PDF rendered yet) or a rendering failure that left
       // the cert without an S3 object. Both are 404 from the client's POV.
@@ -280,10 +314,127 @@ const downloadMyCertificate = async (req, res) => {
   }
 };
 
+// ---- Monthly reports (Environmental Impact + GHG) ------------------------
+//
+// Same two-endpoint shape as certificates — list, then presign on click — and
+// crucially the SAME visibility rule: a report the manager has merely issued
+// is still internal. `CLIENT_VISIBLE_REPORT_STATUSES` is a distinct constant
+// from the certificate one so the two documents' rules can diverge later
+// without one silently inheriting a change meant for the other.
+const CLIENT_VISIBLE_REPORT_STATUSES = ["sent", "superseded"];
+
+// GET /api/client/reports?type=impact|ghg&year=&limit=&offset=
+const listMyReports = async (req, res) => {
+  try {
+    const clientId = req.client._id;
+
+    let statusFilter = { $in: CLIENT_VISIBLE_REPORT_STATUSES };
+    if (
+      req.query.status &&
+      CLIENT_VISIBLE_REPORT_STATUSES.includes(req.query.status)
+    ) {
+      statusFilter = req.query.status;
+    }
+
+    const filter = { client: clientId, status: statusFilter };
+    if (["impact", "ghg"].includes(req.query.type)) filter.type = req.query.type;
+    const year = parseInt(req.query.year, 10);
+    if (Number.isInteger(year)) filter.periodYear = year;
+
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const [total, items] = await Promise.all([
+      Report.countDocuments(filter),
+      Report.find(filter)
+        // Newest reporting period first — not sentAt, so a late-sent report
+        // for an old month still files under that month.
+        .sort({ periodYear: -1, periodMonth: -1, revision: -1 })
+        .skip(offset)
+        .limit(limit)
+        // Internal audit fields stay server-side.
+        .select("-pickupIdsSnapshot -issuedBy -sentBy -pdf")
+        .lean(),
+    ]);
+
+    return res.json({ items, total, limit, offset });
+  } catch (err) {
+    console.error("listMyReports error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// GET /api/client/reports/:id/download
+const downloadMyReport = async (req, res) => {
+  try {
+    const clientId = req.client._id;
+    const reportId = req.params.id;
+
+    if (!mongoose.Types.ObjectId.isValid(reportId)) {
+      return res.status(404).json({ message: "Report not found" });
+    }
+
+    const report = await Report.findOne({
+      _id: reportId,
+      client: clientId,
+    }).lean();
+
+    // Same 404 for "doesn't exist" and "not yours" → no enumeration.
+    if (!report) return res.status(404).json({ message: "Report not found" });
+
+    // Ownership is not enough — a draft or issued-but-unsent report belongs to
+    // this client but has not been released. Identical guard to
+    // downloadMyCertificate; see that handler for the full rationale.
+    if (!CLIENT_VISIBLE_REPORT_STATUSES.includes(report.status)) {
+      return res.status(404).json({ message: "Report not found" });
+    }
+
+    if (!report.pdf || !report.pdf.key) {
+      return res.status(404).json({ message: "Report PDF not available" });
+    }
+
+    const s3 = getS3Client();
+    const command = new GetObjectCommand({
+      Bucket: report.pdf.bucket,
+      Key: report.pdf.key,
+    });
+    const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+
+    return res.json({
+      url,
+      expiresIn: 300,
+      fileName: `${report.reportNumber}.pdf`,
+    });
+  } catch (err) {
+    console.error("downloadMyReport error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// GET /api/client/sites
+//
+// The client's own buildings, so the pickup request form can tag which site
+// the waste is coming from. That tag is what the monthly GHG report groups by.
+const listMySites = async (req, res) => {
+  try {
+    const sites = await Site.find({ client: req.client._id, isActive: true })
+      .select("name description address")
+      .sort({ name: 1 })
+      .lean();
+    return res.json({ items: sites, total: sites.length });
+  } catch (err) {
+    console.error("listMySites error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   loginClient,
   getMe,
   getDashboard,
   listMyCertificates,
+  listMyReports,
+  downloadMyReport,
+  listMySites,
   downloadMyCertificate,
 };

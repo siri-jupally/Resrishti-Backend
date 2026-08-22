@@ -81,7 +81,19 @@ const evidenceSchema = new mongoose.Schema(
     {
         // Which pickup status this evidence corresponds to (e.g. 'en-route').
         status: String,
+
+        // All images captured for this status change. A supervisor can shoot
+        // several angles (load, weighbridge display, gate, damage) in one go.
+        photos: [{ key: String, bucket: String, _id: false }],
+
+        // DEPRECATED single-photo field, kept for backward compatibility:
+        // evidence written before multi-photo shipped only has this, and older
+        // installed app builds still POST a lone `photo` field. Writers now set
+        // BOTH — `photos[]` in full and `photo` mirroring `photos[0]` — so any
+        // reader that hasn't been updated keeps working. Read `photos` first
+        // and fall back to `photo`; see photosOf() below.
         photo: { key: String, bucket: String, _id: false },
+
         gps: { lat: Number, lng: Number, _id: false },
         at: { type: Date, default: Date.now },
         by: {
@@ -112,11 +124,25 @@ const pickupSchema = new mongoose.Schema(
             required: true,
         },
 
+        // Which of the client's buildings/branches this pickup came from.
+        // Optional: clients onboarded before multi-branch shipped have no Sites,
+        // and single-location clients never need one. The monthly GHG report
+        // groups by this — pickups without a site roll up into an
+        // "Unassigned" row rather than being dropped (see reportCalculations).
+        site: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Site",
+            default: null,
+        },
+
         // Denormalized snapshots — captured at create time so historical
         // records (cert PDFs, audit trails) stay stable if the client later
         // renames or relocates.
         clientNameSnapshot: String,
         pickupAddressSnapshot: String,
+        // Frozen site name for the same reason: renaming "HDC2" later must not
+        // rewrite the row labels on an already-issued GHG report.
+        siteNameSnapshot: String,
 
         // Request details (filled by client portal).
         requestedAt: { type: Date, default: Date.now },
@@ -207,4 +233,27 @@ pickupSchema.index({ client: 1, status: 1 });
 pickupSchema.index({ status: 1, scheduledDate: 1 });
 pickupSchema.index({ "supervisor.userId": 1, status: 1 });
 
-module.exports = mongoose.model("Pickup", pickupSchema);
+const Pickup = mongoose.model("Pickup", pickupSchema);
+
+/**
+ * Every photo on an evidence entry, regardless of which era wrote it.
+ *
+ * Multi-photo evidence stores `photos[]`; entries written before that shipped
+ * only have the singular `photo`. Callers that just want "the images for this
+ * step" should use this rather than reaching into either field, so neither
+ * old records nor new ones get silently dropped from a timeline or an audit.
+ *
+ * @param {Object} evidenceEntry
+ * @returns {Array<{key: string, bucket: string}>} possibly empty, never null
+ */
+const photosOf = (evidenceEntry) => {
+    if (!evidenceEntry) return [];
+    const many = Array.isArray(evidenceEntry.photos) ? evidenceEntry.photos : [];
+    if (many.length > 0) return many.filter((p) => p && p.key);
+    return evidenceEntry.photo && evidenceEntry.photo.key
+        ? [evidenceEntry.photo]
+        : [];
+};
+
+module.exports = Pickup;
+module.exports.photosOf = photosOf;

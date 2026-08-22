@@ -57,7 +57,10 @@ try {
     console.warn("Pinyon Script font registration failed, falling back to Times-Italic:", err.message);
 }
 
-const LOGO_PATH = path.join(__dirname, "..", "assets", "logo-resrishti.png");
+// Loaded as a Buffer, not a path: react-pdf fetch()es a string src, which
+// cannot resolve a filesystem path and silently dropped the logo from every
+// issued certificate. See utils/pdfAssets.js.
+const { getLogo } = require("./pdfAssets");
 
 // ---- Stream mapping: our 11 internal pickup streams → 7 GreenEarth template buckets ----
 const STREAM_TO_BUCKET = {
@@ -381,8 +384,11 @@ const buildDoc = (cert, pickup, client) => {
 
     // ===== Page 1 =====
 
+    const logo = getLogo();
     const page1Header = e(View, { style: styles.headerRow },
-        e(Image, { src: LOGO_PATH, style: styles.logoBox }),
+        // Omit the element entirely if the asset is unreadable — a cosmetic
+        // image must not be able to fail a legal document.
+        logo ? e(Image, { src: logo, style: styles.logoBox }) : null,
         e(View, { style: styles.headerTextBlock },
             e(Text, { style: styles.companyName }, "GreenEarth Integrated Facility"),
             e(Text, { style: styles.companySub }, "Private Limited"),

@@ -11,7 +11,7 @@
         listMyPickups — pickups where the current user is the assigned supervisor.
         Supports ?status=<csv> (e.g. accepted,en-route,at-client), ?limit, ?offset.
 
-  - PATCH /api/{role}/my-pickups/:id/status   (multipart, photo)
+  - PATCH /api/{role}/my-pickups/:id/status   (multipart, photos[])
         updatePickupStatus — append an evidence entry, advance pickup.status, fan
         out socket + push notifications. Photo is mandatory for
         en-route|at-client|picked-up|at-facility|weighed transitions.
@@ -73,19 +73,80 @@ const VALID_STREAMS = new Set([
     "other",
 ]);
 
+// Maximum images per status change. Field staff shoot a handful of angles
+// (load, weighbridge display, gate, damage); beyond this it's almost certainly
+// a stuck finger on the shutter, and each image is a 5 MB upload over mobile
+// data. Mirrored on the frontend as MAX_EVIDENCE_PHOTOS.
+const MAX_EVIDENCE_PHOTOS = 8;
+
 // In-memory multer for pickup-evidence photos. Same constraints as check-in
-// selfies (5 MB cap, image MIME only) so the supervisor camera component can be
-// reused on the frontend.
+// selfies (5 MB cap each, image MIME only) so the supervisor camera component
+// can be reused on the frontend.
+//
+// `.fields()` rather than `.array()` so BOTH shapes are accepted:
+//   - photos[]  — current app, one or many images
+//   - photo     — older installed builds that still send a single file
+// A PWA user on a stale cached bundle would otherwise start getting "Photo
+// evidence is required" the moment this deploys, and be unable to work.
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: 5 * 1024 * 1024, files: MAX_EVIDENCE_PHOTOS + 1 },
     fileFilter: (req, file, cb) => {
         if (!/^image\/(jpeg|png|webp)$/i.test(file.mimetype)) {
             return cb(new Error("Only image/jpeg, image/png, image/webp allowed"));
         }
         cb(null, true);
     },
-}).single("photo");
+}).fields([
+    { name: "photos", maxCount: MAX_EVIDENCE_PHOTOS },
+    { name: "photo", maxCount: 1 },
+]);
+
+/**
+ * Wraps the multer middleware so upload failures become clear 400s instead of
+ * falling through to the generic error handler.
+ *
+ * This matters much more now that a status change carries several images: with
+ * one photo the limits were nearly unreachable, but a supervisor firing off a
+ * burst can hit the count cap, and multer's raw wording for that is the deeply
+ * unhelpful "Unexpected field". Field staff on a phone need to know whether to
+ * remove a photo, retake a smaller one, or call the office.
+ */
+const uploadEvidence = (req, res, next) => {
+    upload(req, res, (err) => {
+        if (!err) return next();
+
+        if (err.code === "LIMIT_FILE_SIZE") {
+            return res.status(400).json({
+                message: "Each photo must be 5 MB or smaller. Retake it at a lower resolution.",
+            });
+        }
+        if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE") {
+            return res.status(400).json({
+                message: `You can attach at most ${MAX_EVIDENCE_PHOTOS} photos to one status update.`,
+            });
+        }
+        // fileFilter rejections arrive as a plain Error with our own message.
+        return res.status(400).json({
+            message: err.message || "Could not read the uploaded photos",
+        });
+    });
+};
+
+/**
+ * Flatten multer's `.fields()` output into an ordered file list.
+ *
+ * `photos[]` comes first so that when a client sends both (belt-and-braces
+ * during a rollout), the multi-photo set leads and the legacy single file is
+ * appended only if it isn't a duplicate of the first.
+ */
+const evidenceFilesFrom = (req) => {
+    const f = req.files || {};
+    const many = Array.isArray(f.photos) ? f.photos : [];
+    const single = Array.isArray(f.photo) ? f.photo : [];
+    const all = [...many, ...single].filter((x) => x && x.buffer && x.buffer.length);
+    return all.slice(0, MAX_EVIDENCE_PHOTOS);
+};
 
 // In-memory multer for the OPTIONAL weighbridge slip photo accompanying the
 // waste-data submission. Field name `weighbridgePhoto`. Same 5 MB cap +
@@ -255,8 +316,11 @@ const listMyPickups = async (req, res) => {
 //   - lat:    optional, but recommended.
 //   - lng:    optional.
 //   - notes:  optional.
-// File field:
-//   - photo:  MANDATORY for transitions in PHOTO_REQUIRED_FOR.
+// File fields:
+//   - photos[]: one or more images (up to MAX_EVIDENCE_PHOTOS). At least one is
+//               MANDATORY for transitions in PHOTO_REQUIRED_FOR.
+//   - photo:    legacy single-file field, still accepted so older installed app
+//               builds keep working after this deploys. See `upload` above.
 const updatePickupStatus = async (req, res) => {
     try {
         const me = getCurrentUser(req);
@@ -295,25 +359,44 @@ const updatePickupStatus = async (req, res) => {
             });
         }
 
-        // Photo requirement — for the field-evidence statuses we need a buffer.
+        // Photo requirement — for the field-evidence statuses we need at least
+        // one image. Accepts `photos[]` (current) or `photo` (older builds).
+        const files = evidenceFilesFrom(req);
         const needsPhoto = PHOTO_REQUIRED_FOR.has(newStatus);
-        if (needsPhoto && (!req.file || !req.file.buffer)) {
-            return res.status(400).json({ message: `Photo evidence is required for status '${newStatus}'` });
+        if (needsPhoto && files.length === 0) {
+            return res.status(400).json({
+                message: `Photo evidence is required for status '${newStatus}'`,
+            });
         }
 
-        // Upload to S3 (only when we have a photo — postponed/scheduled may skip).
-        let photo;
-        if (req.file && req.file.buffer) {
+        // Upload every image (postponed/scheduled may legitimately send none).
+        //
+        // All-or-nothing on purpose: if any one image fails we abort BEFORE
+        // touching pickup.status. A partial success would advance the pickup
+        // while quietly dropping evidence, and the supervisor — already back in
+        // the truck — has no way to re-attach it to a status they've passed.
+        let photos = [];
+        if (files.length > 0) {
             try {
-                photo = await uploadPickupEvidence({
-                    pickupID: pickup.pickupID || String(pickup._id),
-                    status: newStatus,
-                    buffer: req.file.buffer,
-                    contentType: req.file.mimetype || "image/jpeg",
-                });
+                photos = await Promise.all(
+                    files.map((file, index) =>
+                        uploadPickupEvidence({
+                            pickupID: pickup.pickupID || String(pickup._id),
+                            status: newStatus,
+                            buffer: file.buffer,
+                            contentType: file.mimetype || "image/jpeg",
+                            index,
+                        })
+                    )
+                );
             } catch (uploadErr) {
                 console.error("Pickup evidence upload failed:", uploadErr);
-                return res.status(500).json({ message: "Failed to store pickup evidence photo" });
+                return res.status(500).json({
+                    message:
+                        files.length > 1
+                            ? "Failed to store one or more evidence photos — nothing was saved, please retry"
+                            : "Failed to store pickup evidence photo",
+                });
             }
         }
 
@@ -324,7 +407,11 @@ const updatePickupStatus = async (req, res) => {
 
         const evidenceEntry = {
             status: newStatus,
-            photo: photo || undefined,
+            photos,
+            // Mirror the first image onto the deprecated singular field so any
+            // reader not yet updated for `photos[]` still shows something.
+            // See the note on evidenceSchema in models/Pickup.js.
+            photo: photos[0] || undefined,
             gps: gpsValid ? { lat, lng } : undefined,
             at: new Date(),
             by: {
@@ -682,10 +769,15 @@ module.exports = {
     listMyPickups,
     updatePickupStatus,
     recordWasteData,
+    // Prefer `uploadEvidence` in routes — it turns multer failures into clear
+    // 400s. `upload` stays exported for anything that wants the raw middleware.
+    uploadEvidence,
     upload,
     wasteDataUpload,
     // Exported for tests / introspection.
     ALLOWED_NEXT,
     PHOTO_REQUIRED_FOR,
     VALID_STREAMS,
+    MAX_EVIDENCE_PHOTOS,
+    evidenceFilesFrom,
 };

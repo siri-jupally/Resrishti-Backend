@@ -58,6 +58,25 @@ const protectClient = async (req, res, next) => {
         return res.status(403).json({ message: "Account inactive" });
       }
 
+      // Reject tokens minted before the password last changed. This is what
+      // makes "reset my password" log the client out of every other device —
+      // without it, a session opened before the reset stays usable for the
+      // remainder of its 7-day life, which defeats the point when the reset
+      // was prompted by someone else having access.
+      //
+      // `iat` is in seconds; passwordChangedAt is stamped 1s in the past by
+      // the Client pre-save hook so a token issued in the same second as the
+      // change is not caught by this. Clients who have never reset (no
+      // passwordChangedAt) are unaffected.
+      if (req.client.passwordChangedAt && decoded.iat) {
+        const issuedAtMs = decoded.iat * 1000;
+        if (issuedAtMs < req.client.passwordChangedAt.getTime()) {
+          return res.status(401).json({
+            message: "Session expired because the password was changed. Please sign in again.",
+          });
+        }
+      }
+
       return next();
     } catch (err) {
       console.error(err);

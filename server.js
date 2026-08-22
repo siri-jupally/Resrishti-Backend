@@ -113,6 +113,41 @@ app.post(
   loginLimiter
 );
 
+/*
+  Password reset needs its OWN limiter — it cannot share loginLimiter.
+
+  Two reasons it differs:
+
+  1. loginLimiter sets `skipSuccessfulRequests: true`, which is right for
+     logins (only failed attempts should burn the brute-force budget). Reset
+     requests must count whether they succeed or not, otherwise the limit
+     never fires on the path that actually sends mail.
+
+  2. It is keyed on IP ALONE, not IP+email like loginLimiter. /forgot-password
+     reports whether an address is registered (a deliberate product choice —
+     see clientPasswordResetController), which makes it an enumeration oracle.
+     Keying on the email would give an attacker a fresh budget for every
+     address they guessed, so probing 10,000 addresses would cost nothing.
+     Per-IP is what actually bounds that.
+
+  10 per 15 minutes per IP is generous for real users — even a shared office
+  NAT is unlikely to have several people resetting passwords at once — while
+  making bulk probing impractical.
+*/
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  keyGenerator: (req) => `pwreset:${ipKey(req)}`,
+  message: {
+    message:
+      "Too many password reset requests. Please wait a few minutes before trying again.",
+  },
+});
+
+app.post("/api/client/forgot-password", passwordResetLimiter);
+
 // Database Connection
 mongoose
   .connect(process.env.MONGO_URI)
@@ -208,6 +243,16 @@ app.use(
 // (Phase 1, Chunk 3). Issue / send / revise the rendered CoD PDFs. Same
 // protectTriage gate as /api/admin/pickups (Admin OR Manager+canCoordinate).
 app.use("/api/manager/certificates", require("./routes/certificateRoutes"));
+
+// Client Management module — monthly client reports (Environmental Impact +
+// GHG Emission). Same protectTriage gate and the same generate → issue → send
+// lifecycle as certificates, but aggregated per client per calendar month
+// rather than per pickup. See controllers/reportController.js.
+app.use("/api/manager/reports", require("./routes/reportRoutes"));
+
+// Client Management module — Sites (client buildings / branches). Admin-only.
+// The GHG report's per-building breakdown groups by these.
+app.use("/api/admin/sites", require("./routes/siteRoutes"));
 
 // Client Management module — public live-stats endpoint (Phase 1, Chunk 3).
 // Unauthenticated; reads from the StatsSnapshot cache recomputed every 15 min

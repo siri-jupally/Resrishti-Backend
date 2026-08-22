@@ -65,6 +65,14 @@ const clientSchema = new mongoose.Schema(
         // `client.passwordHash = plainPassword; await client.save();` so the
         // pre-save hook below hashes it.
         passwordHash: { type: String, select: false },
+
+        // When the password was last set. Read by middleware/authClient to
+        // reject JWTs minted BEFORE this moment, which is what makes a
+        // password reset actually log the client out everywhere instead of
+        // leaving old sessions alive for the rest of their 7-day token life.
+        // Stamped automatically by the pre-save hook below.
+        passwordChangedAt: { type: Date },
+
         isOnboardingComplete: { type: Boolean, default: false },
         // Owner inside Resrishti (account manager). Optional in P1.
         accountManager: { type: mongoose.Schema.Types.ObjectId, ref: "Manager" },
@@ -90,6 +98,14 @@ clientSchema.pre("save", async function () {
     if (!cleaned) throw new Error("Password cannot be empty or whitespace-only");
     const salt = await bcrypt.genSalt(10);
     this.passwordHash = await bcrypt.hash(cleaned, salt);
+
+    // Stamp one second in the PAST on purpose. A JWT's `iat` has whole-second
+    // precision, so a token minted in the same second as this save would
+    // otherwise compare as "issued before the password changed" and be
+    // rejected the instant it was handed out. completeOnboarding sets the
+    // password and immediately issues a JWT, so this is a live path — without
+    // the buffer, a client would finish onboarding and be logged straight out.
+    this.passwordChangedAt = new Date(Date.now() - 1000);
 });
 
 clientSchema.methods.comparePassword = async function (candidate) {
