@@ -43,6 +43,34 @@ const generatePickupId = () => {
     return `PU-${ymd}-${rand}`;
 };
 
+// Certificate-workflow stages that are internal to Resrishti. A certificate
+// sitting in draft or awaiting manager review is not something the client
+// should know about — from their side the waste is simply processed, and the
+// certificate appears when it is actually sent.
+const INTERNAL_CERT_STAGES = new Set(["cert-draft", "cert-issued"]);
+
+/**
+ * Strip internal workflow state out of a pickup before it leaves for the client.
+ *
+ * Two things are hidden:
+ *  - `cert-draft` / `cert-issued` are reported as `processed`. These are review
+ *    stages; surfacing them told the client a certificate existed while it was
+ *    still being checked.
+ *  - The certificate link is withheld until the pickup reaches `cert-sent`.
+ *    Previously the portal offered a download at `cert-issued` that the
+ *    certificate endpoint then refused (only 'sent' certs are downloadable),
+ *    so the client got a button that always errored.
+ *
+ * Masking here rather than only in the UI means the raw API response can't be
+ * read to learn the same thing.
+ */
+const maskPickupForClient = (doc) => {
+    const p = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
+    if (p.status !== "cert-sent") delete p.certificate;
+    if (INTERNAL_CERT_STAGES.has(p.status)) p.status = "processed";
+    return p;
+};
+
 // Stream enum mirrors models/Pickup.js wasteLineItemSchema. Kept in sync by
 // hand — if the spec adds streams later, both lists must update together.
 const ALLOWED_STREAMS = [
@@ -227,7 +255,14 @@ const listMyPickups = async (req, res) => {
         const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
         const query = { client: req.client._id };
-        if (status) query.status = status;
+        // 'processed' is what the client sees for the two internal cert stages
+        // (see maskPickupForClient), so filtering by it must match them too —
+        // otherwise a pickup visibly marked "Processed" vanishes from its own filter.
+        if (status) {
+            query.status = status === "processed"
+                ? { $in: ["processed", ...INTERNAL_CERT_STAGES] }
+                : status;
+        }
 
         const [items, total] = await Promise.all([
             Pickup.find(query)
@@ -237,7 +272,12 @@ const listMyPickups = async (req, res) => {
             Pickup.countDocuments(query),
         ]);
 
-        return res.json({ items, total, limit, offset });
+        return res.json({
+            items: items.map(maskPickupForClient),
+            total,
+            limit,
+            offset,
+        });
     } catch (err) {
         console.error("listMyPickups error:", err);
         return res.status(500).json({ message: err.message });
@@ -274,7 +314,7 @@ const getMyPickup = async (req, res) => {
             }
         }
 
-        return res.json(pickup);
+        return res.json(maskPickupForClient(pickup));
     } catch (err) {
         console.error("getMyPickup error:", err);
         return res.status(500).json({ message: err.message });
