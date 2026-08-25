@@ -172,6 +172,48 @@ const reassignEmployee = async (req, res) => {
     }
 };
 
+// PATCH /api/admin/employees/:id/permissions
+//
+// Lets the Admin make an employee a pickup agent (`canSupervise`), i.e. someone
+// who can be assigned to run a client pickup in the field.
+//
+// Until now only the employee's own Manager could set this, via
+// managerController.updateEmployee. That left the Admin — who owns the client
+// relationship and triages the requests — unable to staff a pickup without
+// going through the manager. The flag itself already existed on the Employee
+// model and is already read by the assign-supervisor pool in
+// adminPickupController.supervisorCandidates, so this only opens the gate.
+//
+// canCoordinate is deliberately NOT settable here. Coordinating means triaging
+// incoming client requests, which stays with Admins and Managers.
+const updateEmployeePermissions = async (req, res) => {
+    try {
+        const { canSupervise } = req.body;
+
+        if (typeof canSupervise !== "boolean") {
+            return res
+                .status(400)
+                .json({ message: "canSupervise (boolean) is required" });
+        }
+
+        const employee = await Employee.findById(req.params.id);
+        if (!employee) {
+            return res.status(404).json({ message: "Employee not found" });
+        }
+
+        employee.canSupervise = canSupervise;
+        await employee.save();
+
+        const updated = await Employee.findById(employee._id)
+            .select("-password")
+            .populate("manager", "name email");
+
+        res.json(updated);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
 // ==================== LEAVE OVERSIGHT ====================
 
 // GET /api/admin/leaves
@@ -327,6 +369,7 @@ module.exports = {
     deleteManager,
     listAllEmployees,
     reassignEmployee,
+    updateEmployeePermissions,
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,

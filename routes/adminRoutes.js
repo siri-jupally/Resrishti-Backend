@@ -21,6 +21,7 @@ const {
     deleteManager,
     listAllEmployees,
     reassignEmployee,
+    updateEmployeePermissions,
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,
@@ -77,6 +78,8 @@ router.route('/managers/:id')
 // Employee oversight
 router.get('/employees', protect, listAllEmployees);
 router.patch('/employees/:id/reassign', protect, reassignEmployee);
+// Make an employee a pickup agent (canSupervise) — see updateEmployeePermissions.
+router.patch('/employees/:id/permissions', protect, updateEmployeePermissions);
 
 // Leave oversight & override
 router.get('/leaves', protect, getAllLeaveRequests);
