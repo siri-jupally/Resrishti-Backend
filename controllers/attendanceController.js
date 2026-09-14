@@ -26,6 +26,8 @@ const multer = require("multer");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { uploadCheckinPhoto } = require("../utils/s3");
 const { isWeekOff } = require("../utils/attendanceDays");
+const { checkWorkModeAllowed, getWorkModeUsage } = require("../utils/workModeGuard");
+const { checkModePermitted, resolveAllowedWorkModes } = require("../utils/workModePermissions");
 
 // In-memory multer for the check-in selfie. We only accept a live JPEG capture
 // from the browser (camera-only on the client); cap to 5 MB to bound abuse.
@@ -95,6 +97,34 @@ const checkIn = async (req, res) => {
                 return res.status(400).json({ message: "Please check out from your current session first" });
             }
         }
+        // Enforce the remote-work policy BEFORE anything is written or the
+        // selfie is uploaded. Blocking here is the whole point: once a record
+        // exists the day has effectively been claimed.
+        const requestedWorkMode = workMode || req.employee.defaultWorkMode || "WFO";
+
+        // Is this mode available to this person at all? Set by admin through
+        // job roles / individual overrides. Checked before the org-wide policy
+        // so someone whose role has no remote option is told that, rather than
+        // being asked to request approval for something they can never use.
+        const denied = await checkModePermitted(req.employee, requestedWorkMode);
+        if (denied) {
+            return res.status(denied.status).json({
+                message: denied.message,
+                allowedWorkModes: denied.allowedWorkModes,
+            });
+        }
+
+        const modeCheck = await checkWorkModeAllowed({
+            policy,
+            Attendance,
+            employeeId,
+            workMode: requestedWorkMode,
+            date: today,
+        });
+        if (!modeCheck.allowed) {
+            return res.status(modeCheck.status).json({ message: modeCheck.message });
+        }
+
         let locationWithinBoundary = null;
         let isLateCheckIn = false;
 
@@ -117,6 +147,19 @@ const checkIn = async (req, res) => {
             } else if (effectiveWorkMode === "remote") {
                 locationWithinBoundary = true; // Remote always accepted
             }
+        }
+
+        // An office check-in that can't be verified as on premises (no GPS sent)
+        // is treated as out of premises whenever offices are configured. It used
+        // to be auto-approved, so switching location off bypassed the geofence.
+        // Out-of-premises days wait for a manager or admin and do not count
+        // toward hours until approved (utils/attendanceCounting.js).
+        if (
+            requestedWorkMode === "WFO" &&
+            locationWithinBoundary === null &&
+            policy?.officeLocations?.length > 0
+        ) {
+            locationWithinBoundary = false;
         }
 
         // Check for late check-in
@@ -176,6 +219,13 @@ const checkIn = async (req, res) => {
                 // Sessions array is the source of truth; legacy checkOut stays as the latest checkout time.
                 existing.workMode = effectiveWorkMode;
                 existing.status = "present";
+                // A later session from outside premises sends the whole day back
+                // for approval. Previously only the first check-in set approval,
+                // so one office check-in covered every later session anywhere.
+                if (locationWithinBoundary === false) {
+                    existing.approvalStatus = "pending";
+                    existing.locationWithinBoundary = false;
+                }
                 if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
                 await existing.save();
                 return res.status(200).json(existing);
@@ -568,7 +618,26 @@ const applyLeave = async (req, res) => {
 const getPolicy = async (req, res) => {
     try {
         const policy = await AttendancePolicy.findOne();
-        res.json(policy || {});
+        // `workModeUsage` rides along so the check-in screen can show remaining
+        // WFH / remote days and disable modes the employee cannot use, rather
+        // than letting them attempt a check-in the server will refuse.
+        const workModeUsage = await getWorkModeUsage({
+            policy,
+            Attendance,
+            employeeId: req.employee._id,
+            date: getTodayStr(),
+        });
+        // Which attendance modes this employee may use (job role / override),
+        // so the check-in screen shows only those buttons.
+        const access = await resolveAllowedWorkModes(req.employee);
+        const base = policy ? policy.toObject() : {};
+        res.json({
+            ...base,
+            workModeUsage,
+            allowedWorkModes: access.modes,
+            workModeAccessSource: access.source,
+            jobRoleName: access.roleName,
+        });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }

@@ -24,6 +24,7 @@ const multer = require("multer");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { uploadCheckinPhoto } = require("../utils/s3");
 const { isWeekOff } = require("../utils/attendanceDays");
+const { checkModePermitted, resolveAllowedWorkModes } = require("../utils/workModePermissions");
 
 // Live camera capture only — see attendanceController for the same pattern.
 const checkInUpload = multer({
@@ -103,6 +104,18 @@ const checkIn = async (req, res) => {
                 return res.status(400).json({ message: "Please check out from your current session first" });
             }
         }
+
+        // Is this mode available to this manager at all? Set by admin through
+        // job roles / individual overrides — same rule as employees.
+        const requestedWorkMode = workMode || "WFO";
+        const denied = await checkModePermitted(req.manager, requestedWorkMode);
+        if (denied) {
+            return res.status(denied.status).json({
+                message: denied.message,
+                allowedWorkModes: denied.allowedWorkModes,
+            });
+        }
+
         let locationWithinBoundary = null;
         let isLateCheckIn = false;
 
@@ -120,6 +133,17 @@ const checkIn = async (req, res) => {
                 // WFH - no home location on manager model, accept it
                 locationWithinBoundary = true;
             }
+        }
+
+        // Unverifiable office check-in (no GPS) counts as out of premises when
+        // offices are configured — it waits for admin approval before its hours
+        // count. See controllers/attendanceController.js.
+        if (
+            requestedWorkMode === "WFO" &&
+            locationWithinBoundary === null &&
+            policy?.officeLocations?.length > 0
+        ) {
+            locationWithinBoundary = false;
         }
 
         if (policy && policy.checkInStartTime) {
@@ -181,6 +205,12 @@ const checkIn = async (req, res) => {
                 // by the next checkOut call.
                 existing.workMode = effectiveWorkMode;
                 existing.status = "present";
+                // A later session from outside premises sends the day back for
+                // approval rather than riding on the first check-in's approval.
+                if (locationWithinBoundary === false) {
+                    existing.approvalStatus = "pending";
+                    existing.locationWithinBoundary = false;
+                }
                 if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
                 await existing.save();
                 console.log("[ManagerCheckIn] Saved additional session. Total sessions:", existing.sessions.length);
@@ -522,7 +552,15 @@ const applyLeave = async (req, res) => {
 const getPolicy = async (req, res) => {
     try {
         const policy = await AttendancePolicy.findOne();
-        res.json(policy || {});
+        // Which attendance modes this manager may use, for the check-in screen.
+        const access = await resolveAllowedWorkModes(req.manager);
+        const base = policy ? policy.toObject() : {};
+        res.json({
+            ...base,
+            allowedWorkModes: access.modes,
+            workModeAccessSource: access.source,
+            jobRoleName: access.roleName,
+        });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }

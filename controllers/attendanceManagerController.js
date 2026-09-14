@@ -20,6 +20,8 @@ const Employee = require("../models/Employee");
 const Admin = require("../models/Admin");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { isWeekOff } = require("../utils/attendanceDays");
+const { summariseWorked } = require("../utils/attendanceCounting");
+const { resolveAllowedWorkModes } = require("../utils/workModePermissions");
 
 // GET /api/manager/attendance/team?date=YYYY-MM-DD
 const getTeamAttendance = async (req, res) => {
@@ -118,13 +120,13 @@ const getTeamSummary = async (req, res) => {
             );
             return {
                 employee: { _id: emp._id, name: emp.name, email: emp.email },
-                present: empRecords.filter((r) => r.status === "present").length,
                 absent: 0, // calculated below
-                halfDay: empRecords.filter((r) => r.status === "half-day").length,
                 leave: empRecords.filter((r) => r.status === "leave").length,
                 wfh: empRecords.filter((r) => r.workMode === "WFH").length,
-                totalHours: empRecords.reduce((sum, r) => sum + (r.workingHours || 0), 0),
                 lateCount: empRecords.filter((r) => r.isLateCheckIn).length,
+                // present, halfDay, totalHours count approved days only;
+                // pendingApproval / pendingHours show what is still waiting.
+                ...summariseWorked(empRecords),
             };
         });
 
@@ -203,6 +205,8 @@ const approveAttendance = async (req, res) => {
 
         attendance.approvalStatus = status;
         if (remarks) attendance.managerRemarks = remarks;
+        attendance.approvedBy = { userType: "Manager", userId: req.manager._id };
+        attendance.approvedAt = new Date();
         await attendance.save();
 
         // Notify employee
@@ -239,6 +243,16 @@ const setEmployeeWorkMode = async (req, res) => {
         });
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        // A manager can only pre-select a mode the admin has made available to
+        // this employee; otherwise check-in would refuse the default set here.
+        const { modes } = await resolveAllowedWorkModes(employee);
+        if (!modes.includes(workMode)) {
+            return res.status(400).json({
+                message: "That work mode isn't available for this employee's job role. Available: " + modes.join(", "),
+                allowedWorkModes: modes,
+            });
         }
 
         employee.defaultWorkMode = workMode;

@@ -73,6 +73,12 @@ const managerAttendanceSchema = new mongoose.Schema(
             default: "pending",
         },
         adminRemarks: { type: String },
+        // Audit of who decided a pending record — see models/Attendance.js.
+        approvedBy: {
+            userType: { type: String, enum: ["Admin"] },
+            userId: { type: mongoose.Schema.Types.ObjectId },
+        },
+        approvedAt: { type: Date },
         wfhTaskSummary: { type: String },
         isLateCheckIn: { type: Boolean, default: false },
         isEarlyCheckOut: { type: Boolean, default: false },

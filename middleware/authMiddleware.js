@@ -17,6 +17,20 @@ const protect = async (req, res, next) => {
 
             // Get admin from the token
             req.admin = await Admin.findById(decoded.id).select('-password');
+            if (!req.admin) {
+                return res.status(401).json({ message: 'Not authorized' });
+            }
+
+            // Reject tokens minted before the last password change, so a reset
+            // ends sessions on every other device. See middleware/authEmployee.js.
+            if (req.admin.passwordChangedAt && decoded.iat) {
+                if (decoded.iat * 1000 < req.admin.passwordChangedAt.getTime()) {
+                    return res.status(401).json({
+                        message:
+                            'Session expired because the password was changed. Please sign in again.',
+                    });
+                }
+            }
 
             next();
         } catch (error) {

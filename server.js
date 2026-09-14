@@ -146,7 +146,13 @@ const passwordResetLimiter = rateLimit({
   },
 });
 
+// One shared budget per IP across every portal: the limiter keys on IP alone,
+// so an attacker cannot get a fresh allowance by switching which role's
+// endpoint they probe.
 app.post("/api/client/forgot-password", passwordResetLimiter);
+app.post("/api/employee/forgot-password", passwordResetLimiter);
+app.post("/api/manager/forgot-password", passwordResetLimiter);
+app.post("/api/admin/forgot-password", passwordResetLimiter);
 
 // Database Connection
 mongoose

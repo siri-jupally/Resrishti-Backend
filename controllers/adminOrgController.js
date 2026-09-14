@@ -5,13 +5,14 @@ const ManagerLeave = require("../models/ManagerLeave");
 const Attendance = require("../models/Attendance");
 const Admin = require("../models/Admin");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
+const { applyJobRole } = require("./workAccessController");
 
 // ==================== MANAGER CRUD ====================
 
 // POST /api/admin/managers
 const createManager = async (req, res) => {
     try {
-        const { name, email, password, jobRole, department, joiningDate, canSupervise, canCoordinate } = req.body;
+        const { name, email, password, jobRole, jobRoleId, department, joiningDate, canSupervise, canCoordinate } = req.body;
         if (!email || !password) {
             return res.status(400).json({ message: "Email and password are required" });
         }
@@ -21,7 +22,7 @@ const createManager = async (req, res) => {
             return res.status(400).json({ message: "Manager with this email already exists" });
         }
 
-        const manager = await Manager.create({
+        const manager = new Manager({
             name, email, password,
             jobRole: jobRole || undefined,
             department: department || undefined,
@@ -29,6 +30,10 @@ const createManager = async (req, res) => {
             canSupervise: canSupervise === true,
             canCoordinate: canCoordinate === true,
         });
+        // A role from the fixed list sets the label and the attendance modes.
+        const roleError = await applyJobRole(manager, "manager", jobRoleId);
+        if (roleError) return res.status(400).json({ message: roleError });
+        await manager.save();
         res.status(201).json({
             _id: manager._id,
             name: manager.name,
@@ -79,7 +84,7 @@ const updateManager = async (req, res) => {
             return res.status(404).json({ message: "Manager not found" });
         }
 
-        const { name, email, password, jobRole, department, joiningDate, canSupervise, canCoordinate } = req.body;
+        const { name, email, password, jobRole, jobRoleId, department, joiningDate, canSupervise, canCoordinate } = req.body;
         if (name !== undefined) manager.name = name;
         if (email !== undefined) manager.email = email;
         if (password) manager.password = password;
@@ -88,6 +93,10 @@ const updateManager = async (req, res) => {
         if (joiningDate !== undefined) manager.joiningDate = joiningDate;
         if (typeof canSupervise === "boolean") manager.canSupervise = canSupervise;
         if (typeof canCoordinate === "boolean") manager.canCoordinate = canCoordinate;
+
+        // Applied after the free-text jobRole so a chosen role's name wins.
+        const roleError = await applyJobRole(manager, "manager", jobRoleId);
+        if (roleError) return res.status(400).json({ message: roleError });
 
         await manager.save();
         res.json({

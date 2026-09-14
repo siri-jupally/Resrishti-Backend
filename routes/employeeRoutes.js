@@ -41,9 +41,18 @@ const {
   upload: profileUpload,
 } = require("../controllers/profileController");
 const { employeeBatchLocations } = require("../controllers/locationController");
+const workModeRequests = require("../controllers/workModeRequestController");
+const staffReset = require("../controllers/staffPasswordResetController");
 const { protectEmployee } = require("../middleware/authEmployee");
 
 router.post("/login", loginEmployee);
+
+// Forgot / reset password — PUBLIC by definition (the caller has no session).
+// Kept next to /login so the unauthenticated surface stays obvious.
+// `forgot-password` is rate-limited centrally in server.js.
+router.post("/forgot-password", staffReset.forgotPassword("employee"));
+router.get("/reset-password/:token", staffReset.verifyResetToken("employee"));
+router.post("/reset-password", staffReset.resetPassword("employee"));
 router.get("/tasks", protectEmployee, listTasksForEmployee);
 router.patch("/tasks/:id", protectEmployee, updateTaskByEmployee);
 
@@ -67,6 +76,12 @@ router.get("/attendance/calendar", protectEmployee, getCalendar);
 router.post("/attendance/correction", protectEmployee, submitCorrection);
 router.get("/attendance/corrections", protectEmployee, getCorrections);
 router.get("/attendance/policy", protectEmployee, getPolicy);
+
+// Work-mode (WFH / remote) request routes — an approved request is what lets
+// the employee check in with that mode. See utils/workModeGuard.js.
+router.post("/work-mode-requests", protectEmployee, workModeRequests.createRequest);
+router.get("/work-mode-requests", protectEmployee, workModeRequests.getMyRequests);
+router.patch("/work-mode-requests/:id/cancel", protectEmployee, workModeRequests.cancelRequest);
 
 // Leave routes
 router.get("/leaves", protectEmployee, getLeaves);

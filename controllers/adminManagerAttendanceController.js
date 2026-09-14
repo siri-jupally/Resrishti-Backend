@@ -20,6 +20,7 @@ const AttendancePolicy = require("../models/AttendancePolicy");
 const Manager = require("../models/Manager");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { isWeekOff } = require("../utils/attendanceDays");
+const { summariseWorked } = require("../utils/attendanceCounting");
 
 // GET /api/admin/manager-attendance/team?date=YYYY-MM-DD
 const getManagersAttendance = async (req, res) => {
@@ -106,13 +107,13 @@ const getManagersSummary = async (req, res) => {
             );
             return {
                 manager: { _id: mgr._id, name: mgr.name, email: mgr.email },
-                present: mgrRecords.filter((r) => r.status === "present").length,
                 absent: 0,
-                halfDay: mgrRecords.filter((r) => r.status === "half-day").length,
                 leave: mgrRecords.filter((r) => r.status === "leave").length,
                 wfh: mgrRecords.filter((r) => r.workMode === "WFH").length,
-                totalHours: mgrRecords.reduce((sum, r) => sum + (r.workingHours || 0), 0),
                 lateCount: mgrRecords.filter((r) => r.isLateCheckIn).length,
+                // present, halfDay, totalHours count approved days only;
+                // pendingApproval / pendingHours show what is still waiting.
+                ...summariseWorked(mgrRecords),
             };
         });
 
@@ -182,6 +183,8 @@ const approveAttendance = async (req, res) => {
 
         attendance.approvalStatus = status;
         if (remarks) attendance.adminRemarks = remarks;
+        attendance.approvedBy = { userType: "Admin", userId: req.admin._id };
+        attendance.approvedAt = new Date();
         await attendance.save();
 
         if (attendance.manager.pushSubscription) {

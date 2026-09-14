@@ -27,6 +27,22 @@ const protectEmployee = async (req, res, next) => {
       req.employee = await Employee.findById(decoded.id).select("-password");
       if (!req.employee)
         return res.status(401).json({ message: "Not authorized" });
+
+      // Reject tokens minted before the password last changed. Without this a
+      // password reset leaves every existing session alive for the rest of its
+      // 30-day life, which defeats the point when the reset was prompted by
+      // someone else having access. `iat` is in seconds; passwordChangedAt is
+      // stamped 1s in the past by the pre-save hook so a token issued in the
+      // same second is not caught. Accounts that have never changed their
+      // password (no passwordChangedAt) are unaffected.
+      if (req.employee.passwordChangedAt && decoded.iat) {
+        if (decoded.iat * 1000 < req.employee.passwordChangedAt.getTime()) {
+          return res.status(401).json({
+            message:
+              "Session expired because the password was changed. Please sign in again.",
+          });
+        }
+      }
       next();
     } catch (err) {
       console.error(err);

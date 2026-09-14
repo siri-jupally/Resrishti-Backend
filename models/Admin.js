@@ -13,6 +13,9 @@ const adminSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    // See models/Employee.js — rejects JWTs older than the last password change
+    // so a reset ends every other session.
+    passwordChangedAt: { type: Date },
     pushSubscription: { type: Object },
 
     // Client-Management module — job tags (not roles).
@@ -29,6 +32,9 @@ adminSchema.pre('save', async function () {
     if (!cleaned) throw new Error('Password cannot be empty or whitespace-only');
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(cleaned, salt);
+
+    // One second in the past — see models/Employee.js for why.
+    this.passwordChangedAt = new Date(Date.now() - 1000);
 });
 
 adminSchema.methods.comparePassword = async function (candidatePassword) {

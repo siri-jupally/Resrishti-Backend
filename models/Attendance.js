@@ -86,6 +86,16 @@ const attendanceSchema = new mongoose.Schema(
             default: "pending",
         },
         managerRemarks: { type: String },
+        // Set when an admin approves or rejects the record directly.
+        adminRemarks: { type: String },
+        // Who decided a pending record, for audit. Pending out-of-premises days
+        // do not count toward worked days or hours until approved
+        // (utils/attendanceCounting.js), so the decision needs to be traceable.
+        approvedBy: {
+            userType: { type: String, enum: ["Manager", "Admin"] },
+            userId: { type: mongoose.Schema.Types.ObjectId },
+        },
+        approvedAt: { type: Date },
         wfhTaskSummary: { type: String },
         isLateCheckIn: { type: Boolean, default: false },
         isEarlyCheckOut: { type: Boolean, default: false },

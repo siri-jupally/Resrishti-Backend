@@ -12,6 +12,7 @@
 const AttendancePolicy = require("../models/AttendancePolicy");
 const Attendance = require("../models/Attendance");
 const Employee = require("../models/Employee");
+const { summariseWorked } = require("../utils/attendanceCounting");
 
 // GET /api/admin/attendance/policy
 const getPolicy = async (req, res) => {
@@ -43,6 +44,10 @@ const updatePolicy = async (req, res) => {
             checkOutMinTime,
             wfhEnabled,
             maxWfhDaysPerMonth,
+            requireApprovalForWfh,
+            remoteEnabled,
+            maxRemoteDaysPerMonth,
+            requireApprovalForRemote,
             leaveQuotas,
             allowMultipleCheckIns,
         } = req.body;
@@ -80,6 +85,10 @@ const updatePolicy = async (req, res) => {
         if (checkOutMinTime !== undefined) policy.checkOutMinTime = checkOutMinTime;
         if (wfhEnabled !== undefined) policy.wfhEnabled = wfhEnabled;
         if (maxWfhDaysPerMonth !== undefined) policy.maxWfhDaysPerMonth = maxWfhDaysPerMonth;
+        if (requireApprovalForWfh !== undefined) policy.requireApprovalForWfh = requireApprovalForWfh;
+        if (remoteEnabled !== undefined) policy.remoteEnabled = remoteEnabled;
+        if (maxRemoteDaysPerMonth !== undefined) policy.maxRemoteDaysPerMonth = maxRemoteDaysPerMonth;
+        if (requireApprovalForRemote !== undefined) policy.requireApprovalForRemote = requireApprovalForRemote;
         if (leaveQuotas !== undefined) policy.leaveQuotas = leaveQuotas;
         if (allowMultipleCheckIns !== undefined) policy.allowMultipleCheckIns = allowMultipleCheckIns;
 
@@ -172,20 +181,31 @@ const getReports = async (req, res) => {
                 lateCount: 0,
                 earlyCheckout: 0,
                 outOfBoundary: 0,
+                pendingApproval: 0,
+                pendingHours: 0,
+                rejected: 0,
             };
+        });
+
+        // Group first so worked days/hours go through the shared approval rule
+        // (utils/attendanceCounting.js) instead of being counted inline.
+        const recordsByEmployee = {};
+        records.forEach((r) => {
+            const key = String(r.employee._id || r.employee);
+            (recordsByEmployee[key] = recordsByEmployee[key] || []).push(r);
+        });
+        Object.entries(recordsByEmployee).forEach(([key, list]) => {
+            if (!employeeMap[key]) return;
+            Object.assign(employeeMap[key], summariseWorked(list));
         });
 
         records.forEach((r) => {
             const key = String(r.employee._id || r.employee);
             if (!employeeMap[key]) return;
 
+            // present / half-day / totalHours are already set above, counting
+            // only approved or auto-approved days.
             switch (r.status) {
-                case "present":
-                    employeeMap[key].present++;
-                    break;
-                case "half-day":
-                    employeeMap[key].halfDay++;
-                    break;
                 case "leave":
                     employeeMap[key].leave++;
                     break;
@@ -198,7 +218,6 @@ const getReports = async (req, res) => {
             }
 
             if (r.workMode === "WFH") employeeMap[key].wfh++;
-            employeeMap[key].totalHours += r.workingHours || 0;
             if (r.isLateCheckIn) employeeMap[key].lateCount++;
             if (r.isEarlyCheckOut) employeeMap[key].earlyCheckout++;
             if (r.locationWithinBoundary === false) employeeMap[key].outOfBoundary++;
@@ -210,7 +229,9 @@ const getReports = async (req, res) => {
         const orgSummary = {
             totalEmployees: employees.length,
             totalRecords: records.length,
-            totalPresent: records.filter((r) => r.status === "present").length,
+            // Counted days only; pending out-of-premises days are reported apart.
+            totalPresent: summariseWorked(records).present,
+            totalPendingApproval: summariseWorked(records).pendingApproval,
             totalAbsent: records.filter((r) => r.status === "absent").length,
             totalLeave: records.filter((r) => r.status === "leave").length,
             totalWfh: records.filter((r) => r.workMode === "WFH").length,

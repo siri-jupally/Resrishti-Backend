@@ -64,8 +64,19 @@ const attendancePolicySchema = new mongoose.Schema(
         checkInStartTime: { type: String, default: "09:00" },
         checkInEndTime: { type: String, default: "11:00" },
         checkOutMinTime: { type: String, default: "17:00" },
+        // ---- Remote-work policy -------------------------------------------
+        // `*Enabled`   — is the mode offered at all?
+        // `max*PerMonth` — how many days per calendar month each employee may use.
+        // `requireApprovalFor*` — must an approved WorkModeRequest cover the day
+        //   BEFORE the employee can check in with that mode? Blocking up front is
+        //   what stops attendance being marked first and questioned later.
+        // Set a limit to 0 to allow the mode with no monthly cap.
         wfhEnabled: { type: Boolean, default: true },
         maxWfhDaysPerMonth: { type: Number, default: 8 },
+        requireApprovalForWfh: { type: Boolean, default: true },
+        remoteEnabled: { type: Boolean, default: true },
+        maxRemoteDaysPerMonth: { type: Number, default: 5 },
+        requireApprovalForRemote: { type: Boolean, default: true },
         allowMultipleCheckIns: { type: Boolean, default: false },
         leaveQuotas: {
             casual: { type: Number, default: 12 },

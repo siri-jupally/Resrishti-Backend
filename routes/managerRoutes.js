@@ -50,11 +50,20 @@ const {
   upload: profileUpload,
 } = require("../controllers/profileController");
 const { managerBatchLocations, getEmployeeTrail } = require("../controllers/locationController");
+const workModeRequests = require("../controllers/workModeRequestController");
+const staffReset = require("../controllers/staffPasswordResetController");
+const workAccess = require("../controllers/workAccessController");
 const { protectManager } = require("../middleware/authManager");
 const { getIo } = require("../socketHandler");
 
 
 router.post("/login", loginManager);
+
+// Forgot / reset password — PUBLIC (the caller has no session).
+// `forgot-password` is rate-limited centrally in server.js.
+router.post("/forgot-password", staffReset.forgotPassword("manager"));
+router.get("/reset-password/:token", staffReset.verifyResetToken("manager"));
+router.post("/reset-password", staffReset.resetPassword("manager"));
 router.post("/employees", protectManager, createEmployee);
 router.get("/employees", protectManager, listEmployees);
 router.delete("/employees/:id", protectManager, deleteEmployee);
@@ -84,6 +93,15 @@ router.patch("/attendance/corrections/:id", protectManager, reviewCorrection);
 // Leave routes
 router.get("/leaves", protectManager, getLeaveRequests);
 router.patch("/leaves/:id", protectManager, reviewLeave);
+
+// WFH / remote requests from this manager's own team.
+router.get("/work-mode-requests", protectManager, workModeRequests.getTeamRequests);
+router.patch("/work-mode-requests/:id", protectManager, workModeRequests.reviewRequest);
+
+// Out-of-premises check-ins from this manager's team awaiting approval.
+router.get("/attendance/pending", protectManager, workAccess.getPendingTeamAttendance);
+// Read-only job role list; assigning roles is admin-only.
+router.get("/job-roles", protectManager, workAccess.listJobRoles);
 
 // Manager self-attendance routes
 router.post("/self-attendance/checkin", protectManager, selfAttendance.checkInUpload, selfAttendance.checkIn);

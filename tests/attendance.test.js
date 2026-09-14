@@ -2107,19 +2107,172 @@ describe("Work Mode Management", () => {
 // ========================================================================
 // SECTION 20: WFH Limit Tests
 // ========================================================================
-describe("WFH Limit Enforcement", () => {
-    test("BUG: maxWfhDaysPerMonth is stored but never enforced during check-in", () => {
-        // The policy has maxWfhDaysPerMonth (default 8) but the checkIn controller
-        // never checks how many WFH days the employee has used this month.
-        // An employee could do WFH every single day without any restriction.
-        expect(true).toBe(true); // documented
+describe("WFH / Remote Limit Enforcement", () => {
+    const { checkWorkModeAllowed } = require("../utils/workModeGuard");
+    const WorkModeRequest = require("../models/WorkModeRequest");
+
+    let employee;
+
+    beforeEach(async () => {
+        await WorkModeRequest.deleteMany({});
+        await Attendance.deleteMany({});
+        const manager = await Manager.create({
+            name: "WM Manager",
+            email: `wm-mgr-${Date.now()}@test.com`,
+            password: "secret123",
+        });
+        employee = await Employee.create({
+            name: "WM Employee",
+            email: `wm-emp-${Date.now()}@test.com`,
+            password: "secret123",
+            manager: manager._id,
+        });
     });
 
-    test("BUG: wfhEnabled flag is stored but never enforced during check-in", () => {
-        // The policy has wfhEnabled (default true) but the checkIn controller
-        // never checks this flag. Even if WFH is disabled, employees can still
-        // check in with workMode "WFH".
-        expect(true).toBe(true); // documented
+    // Approval is on by default, so give the employee a standing approval
+    // wherever the test is about limits rather than about approval itself.
+    const approveRange = (workMode, startDate, endDate) =>
+        WorkModeRequest.create({
+            employee: employee._id,
+            workMode,
+            startDate,
+            endDate,
+            reason: "test",
+            status: "approved",
+        });
+
+    const guard = (policy, workMode, date) =>
+        checkWorkModeAllowed({ policy, Attendance, employeeId: employee._id, workMode, date });
+
+    test("WFO is never restricted", async () => {
+        const policy = { wfhEnabled: false, remoteEnabled: false };
+        const res = await guard(policy, "WFO", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    test("blocks WFH when wfhEnabled is false", async () => {
+        const res = await guard({ wfhEnabled: false }, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(false);
+        expect(res.status).toBe(403);
+        expect(res.message).toMatch(/disabled/i);
+    });
+
+    test("blocks remote when remoteEnabled is false", async () => {
+        const res = await guard({ remoteEnabled: false }, "remote", "2026-03-10");
+        expect(res.allowed).toBe(false);
+        expect(res.status).toBe(403);
+    });
+
+    test("blocks WFH with no approved request when approval is required", async () => {
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 8 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(false);
+        expect(res.message).toMatch(/needs approval/i);
+    });
+
+    test("allows WFH when an approved request covers the date", async () => {
+        await approveRange("WFH", "2026-03-09", "2026-03-11");
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 8 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    test("an approval for one mode does not unlock the other", async () => {
+        await approveRange("WFH", "2026-03-09", "2026-03-11");
+        const policy = { remoteEnabled: true, requireApprovalForRemote: true };
+        const res = await guard(policy, "remote", "2026-03-10");
+        expect(res.allowed).toBe(false);
+    });
+
+    test("approval outside the date range does not apply", async () => {
+        await approveRange("WFH", "2026-03-01", "2026-03-05");
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(false);
+    });
+
+    test("blocks once the monthly WFH limit is reached", async () => {
+        await approveRange("WFH", "2026-03-01", "2026-03-31");
+        for (const d of ["2026-03-02", "2026-03-03", "2026-03-04"]) {
+            await Attendance.create({ employee: employee._id, date: d, workMode: "WFH", status: "present" });
+        }
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 3 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(false);
+        expect(res.message).toMatch(/used all 3/i);
+    });
+
+    test("allows while still under the monthly limit", async () => {
+        await approveRange("WFH", "2026-03-01", "2026-03-31");
+        await Attendance.create({ employee: employee._id, date: "2026-03-02", workMode: "WFH", status: "present" });
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 3 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    // Regression guard: re-checking in on a day already marked WFH must not
+    // count that same day against the quota and lock the employee out mid-day.
+    test("does not count today's own record against the limit", async () => {
+        await approveRange("WFH", "2026-03-01", "2026-03-31");
+        await Attendance.create({ employee: employee._id, date: "2026-03-10", workMode: "WFH", status: "present" });
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 1 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    test("days used in another month do not count", async () => {
+        await approveRange("WFH", "2026-02-01", "2026-03-31");
+        for (const d of ["2026-02-10", "2026-02-11", "2026-02-12"]) {
+            await Attendance.create({ employee: employee._id, date: d, workMode: "WFH", status: "present" });
+        }
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 3 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    test("WFH days do not consume the remote allowance", async () => {
+        await approveRange("WFH", "2026-03-01", "2026-03-31");
+        await approveRange("remote", "2026-03-01", "2026-03-31");
+        for (const d of ["2026-03-02", "2026-03-03"]) {
+            await Attendance.create({ employee: employee._id, date: d, workMode: "WFH", status: "present" });
+        }
+        const policy = {
+            wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 2,
+            remoteEnabled: true, requireApprovalForRemote: true, maxRemoteDaysPerMonth: 2,
+        };
+        expect((await guard(policy, "WFH", "2026-03-10")).allowed).toBe(false);
+        expect((await guard(policy, "remote", "2026-03-10")).allowed).toBe(true);
+    });
+
+    test("a limit of 0 means uncapped", async () => {
+        await approveRange("WFH", "2026-03-01", "2026-03-31");
+        for (const d of ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05"]) {
+            await Attendance.create({ employee: employee._id, date: d, workMode: "WFH", status: "present" });
+        }
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true, maxWfhDaysPerMonth: 0 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    test("approval can be waived per mode", async () => {
+        const policy = { wfhEnabled: true, requireApprovalForWfh: false, maxWfhDaysPerMonth: 8 };
+        const res = await guard(policy, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
+    });
+
+    test("a pending or rejected request does not authorize check-in", async () => {
+        await WorkModeRequest.create({
+            employee: employee._id, workMode: "WFH",
+            startDate: "2026-03-01", endDate: "2026-03-31",
+            reason: "test", status: "pending",
+        });
+        const policy = { wfhEnabled: true, requireApprovalForWfh: true };
+        expect((await guard(policy, "WFH", "2026-03-10")).allowed).toBe(false);
+    });
+
+    test("no policy configured leaves check-in working", async () => {
+        const res = await guard(null, "WFH", "2026-03-10");
+        expect(res.allowed).toBe(true);
     });
 });
 

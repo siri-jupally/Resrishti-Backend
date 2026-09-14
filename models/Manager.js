@@ -30,6 +30,9 @@ const managerSchema = new mongoose.Schema(
       trim: true,
     },
     password: { type: String, required: true },
+    // See models/Employee.js — rejects JWTs older than the last password change
+    // so a reset ends every other session.
+    passwordChangedAt: { type: Date },
     pushSubscription: { type: Object },
     role: { type: String, default: "manager" },
 
@@ -50,6 +53,13 @@ const managerSchema = new mongoose.Schema(
 
     // Job fields (set by admin at creation, read-only for manager)
     jobRole: { type: String },
+    // Admin-assigned job role and optional individual exception. Same meaning
+    // as on models/Employee.js — see utils/workModePermissions.js.
+    jobRoleId: { type: mongoose.Schema.Types.ObjectId, ref: "JobRole" },
+    workModesOverride: {
+      type: [{ type: String, enum: ["WFO", "WFH", "remote"] }],
+      default: undefined,
+    },
     department: { type: String },
     joiningDate: { type: String },
 
@@ -68,6 +78,9 @@ managerSchema.pre("save", async function () {
   if (!cleaned) throw new Error("Password cannot be empty or whitespace-only");
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(cleaned, salt);
+
+  // One second in the past — see models/Employee.js for why.
+  this.passwordChangedAt = new Date(Date.now() - 1000);
 });
 
 managerSchema.methods.comparePassword = async function (candidatePassword) {

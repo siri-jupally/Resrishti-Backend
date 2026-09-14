@@ -30,10 +30,27 @@ const mongoose = require("mongoose");
 
 const passwordResetTokenSchema = new mongoose.Schema(
     {
+        // Exactly one of these two identifies the account:
+        //
+        //   client                     — client-portal account (original use)
+        //   userType + userId          — staff account (Employee / Manager / Admin)
+        //
+        // `client` is no longer `required` so the same collection, TTL rules and
+        // hashing can serve staff resets too. Splitting into a second model
+        // would mean two copies of the security-critical parts (hashed storage,
+        // single use, invalidate-older-tokens), which is exactly what should not
+        // be duplicated.
         client: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Client",
-            required: true,
+        },
+        userType: {
+            type: String,
+            enum: ["Employee", "Manager", "Admin"],
+        },
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            refPath: "userType",
         },
 
         // sha256 hex digest of the token that was emailed. Never the raw value.
@@ -57,6 +74,9 @@ passwordResetTokenSchema.index(
 );
 passwordResetTokenSchema.index({ tokenHash: 1 }, { unique: true });
 // Used by the "invalidate everything older" sweep on each new request.
-passwordResetTokenSchema.index({ client: 1, usedAt: 1 });
+// Sparse so rows of the other kind (which leave the field unset) stay out of
+// the index rather than piling up under a null key.
+passwordResetTokenSchema.index({ client: 1, usedAt: 1 }, { sparse: true });
+passwordResetTokenSchema.index({ userType: 1, userId: 1, usedAt: 1 }, { sparse: true });
 
 module.exports = mongoose.model("PasswordResetToken", passwordResetTokenSchema);

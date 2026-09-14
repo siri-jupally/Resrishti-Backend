@@ -48,9 +48,18 @@ const {
     getSettings: getNotificationSettings,
     updateSettings: updateNotificationSettings,
 } = require('../controllers/notificationSettingsController');
+const workModeRequests = require('../controllers/workModeRequestController');
+const staffReset = require('../controllers/staffPasswordResetController');
+const workAccess = require('../controllers/workAccessController');
 const { protect } = require('../middleware/authMiddleware');
 
 router.post('/login', loginAdmin);
+
+// Forgot / reset password — PUBLIC (the caller has no session).
+// `forgot-password` is rate-limited centrally in server.js.
+router.post('/forgot-password', staffReset.forgotPassword('admin'));
+router.get('/reset-password/:token', staffReset.verifyResetToken('admin'));
+router.post('/reset-password', staffReset.resetPassword('admin'));
 router.post('/seed', seedAdmin); // Remove or protect in production
 
 router.route('/testimonials')
@@ -78,6 +87,25 @@ router.route('/managers/:id')
 // Employee oversight
 router.get('/employees', protect, listAllEmployees);
 router.patch('/employees/:id/reassign', protect, reassignEmployee);
+
+// WFH / remote requests org-wide. Admin decisions override the manager's.
+router.get('/work-mode-requests', protect, workModeRequests.getAllRequests);
+router.patch('/work-mode-requests/:id', protect, workModeRequests.adminReviewRequest);
+
+// Job roles and per-person attendance modes — see controllers/workAccessController.js.
+router.get('/job-roles', protect, workAccess.listJobRoles);
+router.post('/job-roles', protect, workAccess.createJobRole);
+router.patch('/job-roles/:id', protect, workAccess.updateJobRole);
+router.delete('/job-roles/:id', protect, workAccess.deleteJobRole);
+router.get('/work-access', protect, workAccess.listWorkAccess);
+router.patch('/employees/:id/work-access', protect, workAccess.updateWorkAccess('employee'));
+router.patch('/managers/:id/work-access', protect, workAccess.updateWorkAccess('manager'));
+
+// Out-of-premises check-ins awaiting a decision. They do not count toward
+// worked days or hours until approved (utils/attendanceCounting.js).
+router.get('/attendance/pending', protect, workAccess.getPendingEmployeeAttendance);
+router.patch('/attendance/:id/approve', protect, workAccess.adminApproveEmployeeAttendance);
+router.get('/manager-attendance/pending', protect, workAccess.getPendingManagerAttendance);
 // Make an employee a pickup agent (canSupervise) — see updateEmployeePermissions.
 router.patch('/employees/:id/permissions', protect, updateEmployeePermissions);
 
