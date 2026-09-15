@@ -162,6 +162,23 @@ const checkIn = async (req, res) => {
             locationWithinBoundary = false;
         }
 
+        // Admin toggle: when out-of-premises office check-in is switched off,
+        // refuse it here — before the selfie upload or any record is written —
+        // instead of saving it for approval. Applies to additional sessions too.
+        if (
+            requestedWorkMode === "WFO" &&
+            locationWithinBoundary === false &&
+            policy?.allowOutOfPremisesOfficeCheckIn === false
+        ) {
+            const noLocation = lat === undefined || lng === undefined || lat === "" || lng === "";
+            return res.status(403).json({
+                code: noLocation ? "location_required" : "outside_premises",
+                message: noLocation
+                    ? "Turn on location to check in at the office. We couldn't confirm you're on site."
+                    : "You're outside office premises. Office check-in is only allowed on site.",
+            });
+        }
+
         // Check for late check-in
         if (policy && policy.checkInStartTime) {
             const now = new Date();

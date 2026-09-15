@@ -146,6 +146,22 @@ const checkIn = async (req, res) => {
             locationWithinBoundary = false;
         }
 
+        // Admin toggle: refuse out-of-premises office check-in outright when it
+        // is switched off. Same rule as employees — see attendanceController.
+        if (
+            requestedWorkMode === "WFO" &&
+            locationWithinBoundary === false &&
+            policy?.allowOutOfPremisesOfficeCheckIn === false
+        ) {
+            const noLocation = lat === undefined || lng === undefined || lat === "" || lng === "";
+            return res.status(403).json({
+                code: noLocation ? "location_required" : "outside_premises",
+                message: noLocation
+                    ? "Turn on location to check in at the office. We couldn't confirm you're on site."
+                    : "You're outside office premises. Office check-in is only allowed on site.",
+            });
+        }
+
         if (policy && policy.checkInStartTime) {
             const now = new Date();
             const { hours, minutes } = parseTime(policy.checkInStartTime);

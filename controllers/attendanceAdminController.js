@@ -50,6 +50,7 @@ const updatePolicy = async (req, res) => {
             requireApprovalForRemote,
             leaveQuotas,
             allowMultipleCheckIns,
+            allowOutOfPremisesOfficeCheckIn,
         } = req.body;
 
         let policy = await AttendancePolicy.findOne();
@@ -91,6 +92,9 @@ const updatePolicy = async (req, res) => {
         if (requireApprovalForRemote !== undefined) policy.requireApprovalForRemote = requireApprovalForRemote;
         if (leaveQuotas !== undefined) policy.leaveQuotas = leaveQuotas;
         if (allowMultipleCheckIns !== undefined) policy.allowMultipleCheckIns = allowMultipleCheckIns;
+        if (typeof allowOutOfPremisesOfficeCheckIn === "boolean") {
+            policy.allowOutOfPremisesOfficeCheckIn = allowOutOfPremisesOfficeCheckIn;
+        }
 
         await policy.save();
         res.json(policy);

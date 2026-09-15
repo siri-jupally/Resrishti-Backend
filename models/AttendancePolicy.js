@@ -78,6 +78,13 @@ const attendancePolicySchema = new mongoose.Schema(
         maxRemoteDaysPerMonth: { type: Number, default: 5 },
         requireApprovalForRemote: { type: Boolean, default: true },
         allowMultipleCheckIns: { type: Boolean, default: false },
+        // Office check-in from outside every office radius (or with no GPS):
+        //   true  — allowed, but saved as pending; hours don't count until a
+        //           manager or admin approves (utils/attendanceCounting.js).
+        //   false — refused outright; the employee must be on site.
+        // Default true keeps the approval-based behaviour. Has no effect when no
+        // office locations are configured, since premises can't be verified.
+        allowOutOfPremisesOfficeCheckIn: { type: Boolean, default: true },
         leaveQuotas: {
             casual: { type: Number, default: 12 },
             sick: { type: Number, default: 12 },
