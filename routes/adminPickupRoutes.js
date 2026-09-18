@@ -18,6 +18,8 @@ const {
     rejectPickup,
     reassignSupervisor,
     cancelPickup,
+    reschedulePickup,
+    correctWasteData,
     getSupervisorPool,
 } = require("../controllers/adminPickupController");
 
@@ -35,5 +37,9 @@ router.patch("/:id/accept", protectTriage, acceptPickup);
 router.patch("/:id/reject", protectTriage, rejectPickup);
 router.patch("/:id/reassign-supervisor", protectTriage, reassignSupervisor);
 router.patch("/:id/cancel", protectTriage, cancelPickup);
+// Move a pickup to another date, keeping the previous one on record.
+router.patch("/:id/reschedule", protectTriage, reschedulePickup);
+// Correct recorded weights; every change is kept in wasteDataHistory.
+router.patch("/:id/waste-data", protectTriage, correctWasteData);
 
 module.exports = router;

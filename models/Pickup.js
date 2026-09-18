@@ -112,6 +112,44 @@ const evidenceSchema = new mongoose.Schema(
     { _id: false }
 );
 
+// One entry per scheduling change. `scheduledDate` holds only the current
+// date, so without this a moved pickup loses what it was booked for before.
+const scheduleChangeSchema = new mongoose.Schema(
+    {
+        from: Date,
+        to: Date,
+        reason: String,
+        at: { type: Date, default: Date.now },
+        by: {
+            userType: { type: String, enum: ["Admin", "Manager", "Employee"] },
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            _id: false,
+        },
+    },
+    { _id: false }
+);
+
+// One entry per change to the recorded weights, including the first entry.
+// Certificates are issued from these numbers, so every correction records who
+// changed it, when, and why.
+const wasteChangeSchema = new mongoose.Schema(
+    {
+        lineItems: [{ stream: String, qtyKg: Number, _id: false }],
+        totalKg: Number,
+        previousTotalKg: Number,
+        reason: String,
+        at: { type: Date, default: Date.now },
+        by: {
+            userType: { type: String, enum: ["Admin", "Manager", "Employee"] },
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            _id: false,
+        },
+    },
+    { _id: false }
+);
+
 const pickupSchema = new mongoose.Schema(
     {
         // Format: PU-YYYYMMDD-XXXXXX (6 hex chars). Generated in the controller
@@ -171,11 +209,29 @@ const pickupSchema = new mongoose.Schema(
                 "cert-sent",
                 "cancelled",
                 "postponed",
+                // Could not be completed. 'failed' covers anything that stopped
+                // the collection (access denied, vehicle breakdown, waste not
+                // ready); 'no-show' is specifically nobody there to hand it over.
+                // Both are terminal and both carry failureReason.
+                "failed",
+                "no-show",
             ],
         },
         rejectionReason: String,
         cancelledReason: String,
+        // Why a pickup could not be completed (failed / no-show).
+        failureReason: String,
+
+        // Partial collection — only some of the requested waste was taken.
+        // Deliberately a flag and not a status: the pickup still goes through
+        // weighing and certification for what WAS collected, which a terminal
+        // "partial" status would prevent.
+        isPartial: { type: Boolean, default: false },
+        partialReason: String,
+
         scheduledDate: Date,
+        // Previous scheduled dates, oldest first — see scheduleChangeSchema.
+        scheduleHistory: [scheduleChangeSchema],
         acceptedAt: Date,
         acceptedBy: {
             userType: String,
@@ -212,6 +268,8 @@ const pickupSchema = new mongoose.Schema(
             name: String,
             _id: false,
         },
+        // Audit of the weights: the first entry plus every later correction.
+        wasteDataHistory: [wasteChangeSchema],
 
         // Cert — populated as it moves draft → issued → sent. The `Certificate`
         // model doesn't exist yet (Phase 1 step 8). Mongoose resolves refs

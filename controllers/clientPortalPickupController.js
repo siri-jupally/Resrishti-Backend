@@ -25,7 +25,9 @@
   managerController.createTask). See `generatePickupId` below.
 */
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
+const Site = require("../models/Site");
 const Admin = require("../models/Admin");
 const Manager = require("../models/Manager");
 const { sendPush } = require("../utils/push");
@@ -87,6 +89,14 @@ const ALLOWED_STREAMS = [
     "other",
 ];
 
+// Address of the specific location a pickup is for, when the client picked one.
+const formatSiteAddress = (site) => {
+    const a = (site && site.address) || {};
+    return [a.line1, a.line2, a.city, a.state, a.postalCode, a.country]
+        .filter(Boolean)
+        .join(", ");
+};
+
 // Build a human-readable address string from the client's billingAddress
 // object. Snapshotting it onto the pickup ensures the audit trail / cert PDF
 // stays stable even if the client's address changes later.
@@ -100,7 +110,7 @@ const formatPickupAddress = (client) => {
 // POST /api/client/pickups
 const requestPickup = async (req, res) => {
     try {
-        const { requestedDate, requestedStreams, clientNotes } = req.body;
+        const { requestedDate, requestedStreams, clientNotes, siteId } = req.body;
 
         // --- validation ---------------------------------------------------
         if (
@@ -142,6 +152,25 @@ const requestPickup = async (req, res) => {
                 .json({ message: "requestedDate cannot be in the past" });
         }
 
+        // --- location -----------------------------------------------------
+        // Clients with several buildings say which one this pickup is for.
+        // Optional: single-location clients have no Sites at all, and those
+        // pickups fall back to the client's billing address as before.
+        let site = null;
+        if (siteId) {
+            if (!mongoose.Types.ObjectId.isValid(siteId)) {
+                return res.status(400).json({ message: "Invalid location" });
+            }
+            site = await Site.findOne({
+                _id: siteId,
+                client: req.client._id,
+                isActive: true,
+            });
+            if (!site) {
+                return res.status(404).json({ message: "Location not found" });
+            }
+        }
+
         // --- soft duplicate warning ---------------------------------------
         // Admin sees this in the queue; we don't block — they decide.
         try {
@@ -175,7 +204,11 @@ const requestPickup = async (req, res) => {
                     pickupID,
                     client: req.client._id,
                     clientNameSnapshot: req.client.name,
-                    pickupAddressSnapshot: formatPickupAddress(req.client),
+                    site: site ? site._id : null,
+                    siteNameSnapshot: site ? site.name : undefined,
+                    pickupAddressSnapshot: site
+                        ? formatSiteAddress(site)
+                        : formatPickupAddress(req.client),
                     requestedDate: rd,
                     requestedStreams,
                     clientNotes,

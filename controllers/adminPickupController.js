@@ -999,8 +999,265 @@ const getSupervisorPool = async (req, res) => {
     }
 };
 
+/**
+ * PATCH /api/admin/pickups/:id/reschedule
+ * body: { scheduledDate, reason }
+ *
+ * Moves a pickup to a different date, keeping the previous one in
+ * `scheduleHistory` so the change is auditable. Only before the crew sets off:
+ * once the pickup is 'en-route' the date no longer means anything.
+ */
+const reschedulePickup = async (req, res) => {
+    if (!canTriage(req)) {
+        return res.status(403).json({ message: "Not authorized" });
+    }
+    const Pickup = require("../models/Pickup");
+
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid pickup id" });
+        }
+        const { scheduledDate, reason } = req.body || {};
+        const when = new Date(scheduledDate);
+        if (!scheduledDate || Number.isNaN(when.getTime())) {
+            return res.status(400).json({ message: "A valid scheduledDate is required" });
+        }
+        const why = String(reason || "").trim();
+        if (!why) {
+            return res.status(400).json({ message: "reason is required" });
+        }
+
+        const RESCHEDULABLE = ["accepted", "scheduled", "postponed"];
+        const pickup = await Pickup.findById(req.params.id).populate(
+            "client",
+            "name contactName contactEmail pushSubscription"
+        );
+        if (!pickup) {
+            return res.status(404).json({ message: "Pickup not found" });
+        }
+        if (!RESCHEDULABLE.includes(pickup.status)) {
+            return res.status(409).json({
+                message: `A pickup can only be rescheduled before the crew sets off (current: '${pickup.status}')`,
+                allowedFromStatus: RESCHEDULABLE,
+            });
+        }
+
+        const actor = actorFromReq(req);
+        const now = new Date();
+        const previous = pickup.scheduledDate || null;
+
+        pickup.scheduleHistory = pickup.scheduleHistory || [];
+        pickup.scheduleHistory.push({ from: previous, to: when, reason: why, at: now, by: actor });
+        pickup.scheduledDate = when;
+        // A postponed pickup is back on the calendar once it has a date again.
+        pickup.status = "scheduled";
+        pickup.evidence = pickup.evidence || [];
+        pickup.evidence.push({
+            status: "scheduled",
+            notes: `Rescheduled: ${why}`,
+            at: now,
+            by: actor,
+        });
+        await pickup.save();
+
+        const dateText = when.toLocaleDateString("en-IN", {
+            day: "numeric", month: "short", year: "numeric",
+        });
+
+        // ---- notify CLIENT ----
+        if (pickup.client) {
+            await safePush(pickup.client.pushSubscription, {
+                title: "Pickup rescheduled",
+                body: `Pickup ${pickup.pickupID} is now scheduled for ${dateText}.`,
+                icon: "/android-chrome-512x512.png",
+                tag: `pickup-update-${pickup._id}`,
+                data: { url: `/client/pickups/${pickup._id}` },
+            });
+
+            const clientBase = process.env.CLIENT_URL || "http://localhost:5173";
+            const ctaUrl = `${clientBase}/client/pickups/${pickup._id}`;
+            const bodyHtml = `
+                <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+                  Hi ${pickup.client.contactName || "there"},
+                </p>
+                <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+                  Pickup <strong>${pickup.pickupID}</strong> has been moved to
+                  <strong>${dateText}</strong>.
+                </p>
+                <div style="margin:0 0 16px;padding:12px 16px;background:#f1f5f9;border-left:3px solid #059669;border-radius:6px;font-size:14px;color:#334155;">
+                  <strong style="color:#0f172a;">Reason:</strong><br/>
+                  ${why}
+                </div>
+            `;
+            const html = brandedEmail({
+                heading: "Pickup rescheduled",
+                bodyHtml,
+                ctaText: "Open client portal",
+                ctaUrl,
+            });
+            const text = [
+                `Hi ${pickup.client.contactName || "there"},`,
+                ``,
+                `Pickup ${pickup.pickupID} has been moved to ${dateText}.`,
+                `Reason: ${why}`,
+                ``,
+                `Open portal: ${ctaUrl}`,
+                ``,
+                `— The Resrishti Team`,
+            ].join("\n");
+            await safeEmail(pickup.client.contactEmail, "Pickup rescheduled", text, html);
+        }
+
+        // ---- notify SUPERVISOR (if one was assigned) ----
+        if (pickup.supervisor && pickup.supervisor.userId && pickup.supervisor.userType) {
+            const SupervisorModel = modelForUserType(pickup.supervisor.userType);
+            if (SupervisorModel) {
+                try {
+                    const supUser = await SupervisorModel.findById(
+                        pickup.supervisor.userId
+                    ).select("pushSubscription");
+                    if (supUser) {
+                        await safePush(supUser.pushSubscription, {
+                            title: "Pickup rescheduled",
+                            body: `Pickup ${pickup.pickupID} is now on ${dateText}. Reason: ${why}`,
+                            icon: "/android-chrome-512x512.png",
+                            tag: `pickup-update-${pickup._id}`,
+                            data: {
+                                url: `${dashboardPathForSupervisor(pickup.supervisor.userType)}?tab=mypickups`,
+                            },
+                        });
+                    }
+                } catch (e) {
+                    console.error("Supervisor reschedule push failed:", e);
+                }
+            }
+        }
+
+        return res.json(pickup);
+    } catch (err) {
+        console.error("reschedulePickup error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+/**
+ * PATCH /api/admin/pickups/:id/waste-data
+ * body: { lineItems: [{ stream, qtyKg }], reason }
+ *
+ * Corrects recorded weights after the field entry — a misread weighbridge, a
+ * stream logged against the wrong category. Every change is appended to
+ * `wasteDataHistory` with who, what, when and why.
+ *
+ * An already-issued certificate is NOT rewritten: issued certificates are
+ * immutable by design. The response says so, and the fix is the certificate
+ * revise flow, which supersedes the old one and keeps both on record.
+ */
+const correctWasteData = async (req, res) => {
+    if (!canTriage(req)) {
+        return res.status(403).json({ message: "Not authorized" });
+    }
+    const Pickup = require("../models/Pickup");
+
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid pickup id" });
+        }
+        const { lineItems, reason } = req.body || {};
+        const why = String(reason || "").trim();
+        if (!why) {
+            return res.status(400).json({ message: "reason is required for a weight correction" });
+        }
+        if (!Array.isArray(lineItems) || lineItems.length === 0) {
+            return res.status(400).json({ message: "lineItems must be a non-empty array" });
+        }
+
+        const pickup = await Pickup.findById(req.params.id);
+        if (!pickup) {
+            return res.status(404).json({ message: "Pickup not found" });
+        }
+
+        // Only once weights exist. Before that the field entry is the way in.
+        const CORRECTABLE = ["processed", "cert-draft", "cert-issued", "cert-sent"];
+        if (!CORRECTABLE.includes(pickup.status)) {
+            return res.status(409).json({
+                message: `Weights can only be corrected after they have been recorded (current: '${pickup.status}')`,
+                allowedFromStatus: CORRECTABLE,
+            });
+        }
+
+        // Validate against the model's own stream list so there is one source
+        // of truth for what a waste category may be.
+        const validStreams = new Set(
+            Pickup.schema.path("lineItems").schema.path("stream").enumValues
+        );
+        const merged = new Map();
+        for (let i = 0; i < lineItems.length; i += 1) {
+            const item = lineItems[i] || {};
+            const stream = String(item.stream || "").trim();
+            const qtyKg = Number(item.qtyKg);
+            if (!validStreams.has(stream)) {
+                return res.status(400).json({
+                    message: `lineItems[${i}].stream must be one of: ${[...validStreams].join(", ")}`,
+                });
+            }
+            if (!Number.isFinite(qtyKg) || qtyKg <= 0) {
+                return res.status(400).json({
+                    message: `lineItems[${i}].qtyKg must be a positive number`,
+                });
+            }
+            const existing = merged.get(stream);
+            if (existing) existing.qtyKg += qtyKg;
+            else merged.set(stream, { stream, qtyKg });
+        }
+
+        const corrected = [...merged.values()];
+        const totalKg = corrected.reduce((sum, li) => sum + li.qtyKg, 0);
+        if (totalKg <= 0) {
+            return res.status(400).json({ message: "Total weight must be more than zero" });
+        }
+
+        const actor = actorFromReq(req);
+        const now = new Date();
+        const previousTotalKg = pickup.totalKg || 0;
+
+        pickup.lineItems = corrected;
+        pickup.totalKg = totalKg;
+        pickup.wasteDataHistory = pickup.wasteDataHistory || [];
+        pickup.wasteDataHistory.push({
+            lineItems: corrected.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+            totalKg,
+            previousTotalKg,
+            reason: why,
+            at: now,
+            by: actor,
+        });
+        pickup.evidence = pickup.evidence || [];
+        pickup.evidence.push({
+            status: pickup.status,
+            notes: `Weights corrected (${previousTotalKg} kg → ${totalKg} kg): ${why}`,
+            at: now,
+            by: actor,
+        });
+        await pickup.save();
+
+        const certificateIssued = ["cert-issued", "cert-sent"].includes(pickup.status);
+        return res.json({
+            pickup,
+            certificateIssued,
+            message: certificateIssued
+                ? "Weights corrected. The issued certificate still shows the old figures — revise it to reissue with these."
+                : "Weights corrected.",
+        });
+    } catch (err) {
+        console.error("correctWasteData error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listPickups,
+    reschedulePickup,
+    correctWasteData,
     getPickup,
     acceptPickup,
     rejectPickup,

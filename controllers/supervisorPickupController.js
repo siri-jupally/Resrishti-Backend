@@ -166,11 +166,14 @@ const wasteDataUpload = multer({
 // Valid next-status transitions for the supervisor flow. Anything outside this
 // map is rejected with 409. See clientmngmt.md §8.1 for the full state machine.
 const ALLOWED_NEXT = {
-    "accepted": ["en-route", "postponed"],
-    "scheduled": ["en-route", "postponed"],
+    // failed / no-show are only offered while the waste is still with the
+    // client. Once it is 'picked-up' the collection has happened, so the right
+    // correction is the weights, not a failure.
+    "accepted": ["en-route", "postponed", "failed", "no-show"],
+    "scheduled": ["en-route", "postponed", "failed", "no-show"],
     "postponed": ["scheduled"],
-    "en-route": ["at-client"],
-    "at-client": ["picked-up"],
+    "en-route": ["at-client", "failed", "no-show"],
+    "at-client": ["picked-up", "failed", "no-show"],
     "picked-up": ["at-facility"],
     "at-facility": ["weighed"],
     // After 'weighed', the waste-data endpoint takes over (out of scope here).
@@ -185,6 +188,10 @@ const PHOTO_REQUIRED_FOR = new Set([
     "at-facility",
     "weighed",
 ]);
+
+// Outcomes that end the pickup in the field. There is no photo and no weight
+// for these, so the reason is the only record of what happened — hence required.
+const FIELD_TERMINAL = new Set(["failed", "no-show"]);
 
 // User-facing notification copy per status (sent to the client's push
 // subscription if they have one). Quiet statuses are intentionally absent.
@@ -208,6 +215,14 @@ const CLIENT_NOTIFICATION = {
     "weighed": {
         title: "Waste weighed",
         body: "Your waste has been weighed. Certificate coming soon.",
+    },
+    "failed": {
+        title: "Pickup could not be completed",
+        body: "We couldn't complete your pickup. Our team will be in touch.",
+    },
+    "no-show": {
+        title: "Pickup could not be completed",
+        body: "Our team couldn't collect your waste. Our team will be in touch.",
     },
 };
 
@@ -359,6 +374,14 @@ const updatePickupStatus = async (req, res) => {
             });
         }
 
+        // A failed / no-show pickup must say why.
+        const failureReason = String(req.body.reason || "").trim();
+        if (FIELD_TERMINAL.has(newStatus) && !failureReason) {
+            return res.status(400).json({
+                message: `A reason is required when marking a pickup '${newStatus}'`,
+            });
+        }
+
         // Photo requirement — for the field-evidence statuses we need at least
         // one image. Accepts `photos[]` (current) or `photo` (older builds).
         const files = evidenceFilesFrom(req);
@@ -424,6 +447,10 @@ const updatePickupStatus = async (req, res) => {
         pickup.evidence = pickup.evidence || [];
         pickup.evidence.push(evidenceEntry);
         pickup.status = newStatus;
+        if (FIELD_TERMINAL.has(newStatus)) {
+            pickup.failureReason = failureReason;
+            evidenceEntry.notes = failureReason;
+        }
         if (req.body.notes) {
             // Append to clientNotes-adjacent supervisor log if model has one;
             // otherwise stash on the evidence entry. We don't want to silently
@@ -629,10 +656,33 @@ const recordWasteData = async (req, res) => {
             name: me.name,
         };
 
+        // Partial collection — only some of the waste was taken. A flag rather
+        // than a status, so the pickup still certifies what WAS collected.
+        const isPartial = req.body.isPartial === true || String(req.body.isPartial) === "true";
+        const partialReason = String(req.body.partialReason || "").trim();
+        if (isPartial && !partialReason) {
+            return res.status(400).json({
+                message: "partialReason is required when marking a pickup as a partial collection",
+            });
+        }
+
+        const previousTotalKg = pickup.totalKg || 0;
         pickup.lineItems = parsedLineItems;
         pickup.totalKg = totalKg;
+        pickup.isPartial = isPartial;
+        pickup.partialReason = isPartial ? partialReason : undefined;
         pickup.wasteDataEnteredAt = now;
         pickup.wasteDataEnteredBy = actorSnapshot;
+        // First entry in the weight audit trail; corrections append to it.
+        pickup.wasteDataHistory = pickup.wasteDataHistory || [];
+        pickup.wasteDataHistory.push({
+            lineItems: parsedLineItems.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+            totalKg,
+            previousTotalKg,
+            reason: isPartial ? `Recorded in the field — partial: ${partialReason}` : "Recorded in the field",
+            at: now,
+            by: actorSnapshot,
+        });
         pickup.status = "processed";
         pickup.evidence = pickup.evidence || [];
         pickup.evidence.push({
