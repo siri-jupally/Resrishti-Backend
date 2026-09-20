@@ -226,6 +226,8 @@ app.use("/api/client/pickups", require("./routes/clientPortalPickupRoutes"));
 app.use("/api/admin/pickups", require("./routes/adminPickupRoutes"));
 // Admin-editable waste stream list + CO2e factors.
 app.use("/api/admin/waste-categories", require("./routes/wasteCategoryRoutes"));
+// Operational KPIs for the admin dashboard.
+app.use("/api/admin/dashboard", require("./routes/managementDashboardRoutes"));
 // Supervisor pool — exposed at the spec'd path /api/admin/supervisor-pool.
 const { protectTriage } = require("./middleware/authTriage");
 const { getSupervisorPool } = require("./controllers/adminPickupController");
