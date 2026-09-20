@@ -20,5 +20,7 @@ router.get("/:id", protectTriage, ctrl.getCertificate);
 router.patch("/:id/issue", protectTriage, ctrl.issueCertificate);
 router.post("/:id/send", protectTriage, ctrl.sendCertificate);
 router.post("/:id/revise", protectTriage, ctrl.reviseCertificate);
+// Withdraw a certificate entirely. Correcting figures is a revise, not this.
+router.post("/:id/cancel", protectTriage, ctrl.cancelCertificate);
 
 module.exports = router;

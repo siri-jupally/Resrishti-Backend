@@ -73,10 +73,26 @@ const certificateSchema = new mongoose.Schema(
             required: true,
         },
 
+        // draft      — drafted from the weighed pickup, not rendered yet
+        // issued     — PDF rendered, still internal
+        // sent       — delivered to the client
+        // superseded — replaced by a later revision, kept for audit
+        // cancelled  — withdrawn; never valid, and never downloadable again
         status: {
             type: String,
-            enum: ["draft", "issued", "sent", "superseded"],
+            enum: ["draft", "issued", "sent", "superseded", "cancelled"],
             default: "draft",
+        },
+
+        // Why a certificate was withdrawn. Required by the cancel endpoint —
+        // a voided document with no explanation is worse than none.
+        cancelledAt: Date,
+        cancelledReason: String,
+        cancelledBy: {
+            userType: String,
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            _id: false,
         },
 
         // --- Immutable snapshots (frozen at issuance) -----------------------

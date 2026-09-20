@@ -294,7 +294,7 @@ const listCertificates = async (req, res) => {
                 .split(",")
                 .map((s) => s.trim())
                 .filter(Boolean);
-            const ALLOWED = ["draft", "issued", "sent", "superseded"];
+            const ALLOWED = ["draft", "issued", "sent", "superseded", "cancelled"];
             const safe = statuses.filter((s) => ALLOWED.includes(s));
             if (safe.length) filter.status = { $in: safe };
         }
@@ -690,9 +690,13 @@ const reviseCertificate = async (req, res) => {
         if (!oldCert) {
             return res.status(404).json({ message: "Certificate not found" });
         }
-        if (oldCert.status !== "sent") {
+        // A sent certificate is revised; a cancelled one is replaced. Both
+        // produce a fresh draft carrying the same certificate number, so the
+        // number a client has on file never changes.
+        const REVISABLE = ["sent", "cancelled"];
+        if (!REVISABLE.includes(oldCert.status)) {
             return res.status(409).json({
-                message: `Only sent certificates can be revised (current: '${oldCert.status}')`,
+                message: `Only sent or cancelled certificates can be replaced (current: '${oldCert.status}')`,
             });
         }
 
@@ -720,9 +724,13 @@ const reviseCertificate = async (req, res) => {
             pickupDateSnapshot: oldCert.pickupDateSnapshot,
         });
 
-        // New cert exists — now safely mark the old one superseded.
-        oldCert.status = "superseded";
-        await oldCert.save();
+        // New cert exists — now safely retire the old one. A cancelled
+        // certificate stays cancelled: it was withdrawn, not merely replaced,
+        // and the record of that has to survive.
+        if (oldCert.status === "sent") {
+            oldCert.status = "superseded";
+            await oldCert.save();
+        }
 
         // Repoint the pickup at the new draft and roll its status back to
         // 'cert-draft' so the manager's review queue picks it up cleanly.
@@ -765,12 +773,155 @@ const reviseCertificate = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/manager/certificates/:id/cancel
+ * body: { reason }
+ *
+ * Withdraw a certificate. Used when it should never have been produced at all
+ * — wrong client, a pickup that did not happen, waste that was not ours to
+ * certify. A cancelled certificate can never be downloaded again, by us or by
+ * the client, and the client is told if they had already received it.
+ *
+ * Correcting figures is a different action: revise the certificate instead,
+ * which keeps the number and issues a new revision.
+ */
+const cancelCertificate = async (req, res) => {
+    try {
+        if (!canTriage(req)) {
+            return res.status(403).json({ message: "Not authorized" });
+        }
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: "Invalid certificate id" });
+        }
+        const reason = String(req.body?.reason || "").trim();
+        if (reason.length < 5) {
+            return res.status(400).json({
+                message: "A reason is required to cancel a certificate",
+            });
+        }
+
+        const cert = await Certificate.findById(id);
+        if (!cert) {
+            return res.status(404).json({ message: "Certificate not found" });
+        }
+        const CANCELLABLE = ["draft", "issued", "sent"];
+        if (!CANCELLABLE.includes(cert.status)) {
+            return res.status(409).json({
+                message: `This certificate cannot be cancelled (current: '${cert.status}')`,
+                allowedFromStatus: CANCELLABLE,
+            });
+        }
+
+        const actor = actorFromReq(req);
+        const wasSent = cert.status === "sent";
+        cert.status = "cancelled";
+        cert.cancelledAt = new Date();
+        cert.cancelledReason = reason;
+        cert.cancelledBy = actor;
+        await cert.save();
+
+        // Put the pickup back to 'processed'. The waste was still collected and
+        // weighed — only the document is void — so the pickup stays complete
+        // and a replacement certificate can be drafted from it.
+        try {
+            const pkup = await Pickup.findById(cert.pickup);
+            if (pkup && ["cert-draft", "cert-issued", "cert-sent"].includes(pkup.status)) {
+                pkup.status = "processed";
+                pkup.evidence = pkup.evidence || [];
+                pkup.evidence.push({
+                    status: "processed",
+                    notes: `Certificate ${cert.certNumber} cancelled: ${reason}`,
+                    at: new Date(),
+                    by: actor,
+                });
+                await pkup.save();
+
+                try {
+                    const io = getIo();
+                    io.to(`pickup_${pkup._id}`).emit("pickup:status-updated", {
+                        pickupId: pkup._id,
+                        status: "processed",
+                        certificateId: cert._id,
+                        certificateCancelled: true,
+                    });
+                } catch (socketErr) {
+                    console.error(
+                        "Socket emit error (cert cancel):",
+                        socketErr.message || socketErr
+                    );
+                }
+            }
+        } catch (pkErr) {
+            console.error("pickup mirror error (cancel):", pkErr);
+        }
+
+        // Only tell the client about a document they actually hold.
+        if (wasSent) {
+            try {
+                const client = await Client.findById(cert.client)
+                    .select("name contactName contactEmail pushSubscription")
+                    .lean();
+                if (client?.contactEmail) {
+                    const text = [
+                        `Dear ${client.contactName || client.name},`,
+                        "",
+                        `Certificate ${cert.certNumber} has been cancelled and is no longer valid.`,
+                        "",
+                        `Reason: ${reason}`,
+                        "",
+                        "Please disregard any copy you hold. If a replacement is due, we will send it shortly.",
+                        "",
+                        "GreenEarth Integrated Facility Pvt Ltd",
+                    ].join("\n");
+                    const html = `
+                      <p>Dear ${client.contactName || client.name},</p>
+                      <p>Certificate <strong>${cert.certNumber}</strong> has been cancelled and is no longer valid.</p>
+                      <p><strong>Reason:</strong> ${reason}</p>
+                      <p>Please disregard any copy you hold. If a replacement is due, we will send it shortly.</p>
+                      <p>GreenEarth Integrated Facility Pvt Ltd</p>
+                    `;
+                    await sendEmail(
+                        client.contactEmail,
+                        `Certificate ${cert.certNumber} cancelled`,
+                        text,
+                        html
+                    );
+                }
+                if (client?.pushSubscription) {
+                    await notifyIfEnabled("pickup", client.pushSubscription, {
+                        title: "Certificate cancelled",
+                        body: `Certificate ${cert.certNumber} is no longer valid. Reason: ${reason}`,
+                        icon: "/android-chrome-512x512.png",
+                        data: { url: "/client/certificates" },
+                    });
+                }
+            } catch (notifyErr) {
+                console.error(
+                    "Client notify error (cert cancelled):",
+                    notifyErr.message || notifyErr
+                );
+            }
+        }
+
+        const populated = await Certificate.findById(cert._id)
+            .populate("pickup")
+            .populate("client")
+            .lean();
+        return res.json(populated);
+    } catch (err) {
+        console.error("cancelCertificate error:", err);
+        return res.status(500).json({ message: "Server error" });
+    }
+};
+
 module.exports = {
     listCertificates,
     getCertificate,
     issueCertificate,
     sendCertificate,
     reviseCertificate,
+    cancelCertificate,
     // Exported for testing / smoke checks — not wired into a route.
     buildCertEmail,
 };

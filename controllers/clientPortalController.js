@@ -44,7 +44,13 @@ const { co2eForLineItems } = require("../utils/emissionFactors");
 // `draft` = not rendered yet; `issued` = PDF exists but the manager has NOT
 // pressed Send, so it is still internal. Both list + download read this, so a
 // status can never be visible in one path and blocked in the other.
-const CLIENT_VISIBLE_CERT_STATUSES = ["sent", "superseded"];
+const CLIENT_VISIBLE_CERT_STATUSES = ["sent", "superseded", "cancelled"];
+
+// ...but a cancelled certificate is void, so the PDF is withheld even though
+// the client can see that it existed and why it was withdrawn. A certificate
+// cancelled before it was ever sent is not listed at all — see
+// listMyCertificates.
+const CLIENT_DOWNLOADABLE_CERT_STATUSES = ["sent", "superseded"];
 
 // 7-day expiry mirrors clientmngmt.md §10.3.
 const generateClientToken = (id) =>
@@ -228,6 +234,14 @@ const listMyCertificates = async (req, res) => {
 
     const filter = { client: clientId, status: statusFilter };
 
+    // A certificate cancelled before it ever left the building is not the
+    // client's business — they never held it. One cancelled after it was sent
+    // is, because they need to know the copy they have is void.
+    filter.$or = [
+      { status: { $ne: "cancelled" } },
+      { status: "cancelled", sentAt: { $ne: null } },
+    ];
+
     // Count + page in parallel to keep latency low on big histories.
     const [total, items] = await Promise.all([
       Certificate.countDocuments(filter),
@@ -282,7 +296,7 @@ const downloadMyCertificate = async (req, res) => {
     // client who learned an id (e.g. from a socket event or an earlier build
     // that listed issued certs) could pull the PDF before it was ever sent.
     // Same 404 as above so the endpoint never confirms the cert exists.
-    if (!CLIENT_VISIBLE_CERT_STATUSES.includes(cert.status)) {
+    if (!CLIENT_DOWNLOADABLE_CERT_STATUSES.includes(cert.status)) {
       return res.status(404).json({ message: "Certificate not found" });
     }
 

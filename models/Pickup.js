@@ -91,6 +91,13 @@ const evidenceSchema = new mongoose.Schema(
         photo: { key: String, bucket: String, _id: false },
 
         gps: { lat: Number, lng: Number, _id: false },
+
+        // Why this happened, in the actor's words: a rejection reason, a
+        // cancellation, why a pickup moved, why weights were corrected. Nine
+        // call sites were already writing this; without the field, Mongoose
+        // dropped every one of them and the audit trail lost the reasons.
+        notes: String,
+
         at: { type: Date, default: Date.now },
         by: {
             // 'Client' added beyond the spec's {Admin,Manager,Employee} so the
