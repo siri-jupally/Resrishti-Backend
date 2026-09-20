@@ -32,6 +32,7 @@ const {
   listMyReports,
   downloadMyReport,
   listMySites,
+  listWasteCategories,
 } = require("../controllers/clientPortalController");
 const {
   forgotPassword,
@@ -64,5 +65,7 @@ router.get("/reports/:id/download", protectClient, downloadMyReport);
 
 // The client's own buildings, for tagging a pickup request to a site.
 router.get("/sites", protectClient, listMySites);
+// The configured waste streams, for the pickup request form.
+router.get("/waste-categories", protectClient, listWasteCategories);
 
 module.exports = router;

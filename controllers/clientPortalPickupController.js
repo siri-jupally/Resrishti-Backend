@@ -73,21 +73,10 @@ const maskPickupForClient = (doc) => {
     return p;
 };
 
-// Stream enum mirrors models/Pickup.js wasteLineItemSchema. Kept in sync by
-// hand — if the spec adds streams later, both lists must update together.
-const ALLOWED_STREAMS = [
-    "plastic",
-    "paper",
-    "ewaste",
-    "biomedical",
-    "foam-thermocol",
-    "dry-waste",
-    "agr",
-    "battery",
-    "expired-food",
-    "hazardous",
-    "other",
-];
+// What a client may request today. Read from the configurable registry (see
+// models/WasteCategory.js) rather than a hard-coded list, so switching a
+// stream off in admin settings takes it off the request form immediately.
+const { activeStreamKeys } = require("../utils/wasteCategories");
 
 // Address of the specific location a pickup is for, when the client picked one.
 const formatSiteAddress = (site) => {
@@ -121,8 +110,9 @@ const requestPickup = async (req, res) => {
                 .status(400)
                 .json({ message: "requestedStreams must be a non-empty array" });
         }
+        const allowedStreams = await activeStreamKeys();
         const invalidStream = requestedStreams.find(
-            (s) => !ALLOWED_STREAMS.includes(s)
+            (s) => !allowedStreams.includes(s)
         );
         if (invalidStream) {
             return res

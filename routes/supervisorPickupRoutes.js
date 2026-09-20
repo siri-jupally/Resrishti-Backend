@@ -32,6 +32,8 @@ const ctrl = require("../controllers/supervisorPickupController");
  */
 const factory = (roleAuth) => {
     const r = express.Router();
+    // Literal path first, so it is not read as a pickup id.
+    r.get("/waste-categories", roleAuth, ctrl.listWasteCategories);
     r.get("/", roleAuth, ctrl.listMyPickups);
     // ctrl.uploadEvidence parses the multipart form before updatePickupStatus
     // runs, and converts multer failures (too many files, oversized image,

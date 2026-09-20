@@ -192,6 +192,17 @@ mongoose
     } catch (e) {
       if (e.codeName !== "NamespaceNotFound") console.error("Policy backfill:", e.message);
     }
+
+    // Waste stream list: seed the eleven built-in streams if they are missing,
+    // then load them into memory. Certificates and the impact counter read the
+    // cached copy synchronously, so this has to happen before traffic arrives.
+    try {
+      const { initWasteCategories } = require("./utils/wasteCategories");
+      const seeded = await initWasteCategories();
+      if (seeded > 0) console.log(`Seeded ${seeded} waste categor${seeded === 1 ? "y" : "ies"}`);
+    } catch (e) {
+      console.error("Waste category init:", e.message);
+    }
   })
   .catch((err) => console.error("MongoDB Connection Error:", err));
 
@@ -213,6 +224,8 @@ app.use("/api/client/pickups", require("./routes/clientPortalPickupRoutes"));
 // Client Management module — admin/coordinator pickup triage endpoints
 // (Phase 1, Chunk 2). Auth via protectTriage (Admin OR Manager+canCoordinate).
 app.use("/api/admin/pickups", require("./routes/adminPickupRoutes"));
+// Admin-editable waste stream list + CO2e factors.
+app.use("/api/admin/waste-categories", require("./routes/wasteCategoryRoutes"));
 // Supervisor pool — exposed at the spec'd path /api/admin/supervisor-pool.
 const { protectTriage } = require("./middleware/authTriage");
 const { getSupervisorPool } = require("./controllers/adminPickupController");

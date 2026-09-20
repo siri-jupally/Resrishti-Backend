@@ -44,22 +44,18 @@ const mongoose = require("mongoose");
 // Each line item is one stream + qty (filled after weighing, per clientmngmt.md §6.3).
 const wasteLineItemSchema = new mongoose.Schema(
     {
+        // Streams are configurable (see models/WasteCategory.js), so this is a
+        // lookup rather than a fixed enum. The check is async on purpose: a
+        // category added seconds ago on another instance must be accepted
+        // without waiting for this process's cache to catch up.
         stream: {
             type: String,
             required: true,
-            enum: [
-                "plastic",
-                "paper",
-                "ewaste",
-                "biomedical",
-                "foam-thermocol",
-                "dry-waste",
-                "agr",
-                "battery",
-                "expired-food",
-                "hazardous",
-                "other",
-            ],
+            validate: {
+                validator: (value) =>
+                    require("../utils/wasteCategories").isKnownStream(value),
+                message: (props) => `'${props.value}' is not a configured waste category`,
+            },
         },
         qtyKg: { type: Number, required: true, min: 0 },
         // S3 location of the weighbridge photo. `_id: false` keeps the sub-doc

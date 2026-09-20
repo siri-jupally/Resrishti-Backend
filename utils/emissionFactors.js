@@ -47,7 +47,10 @@ const FACTORS = {
  */
 const co2eForLineItems = (lineItems) =>
     (lineItems || []).reduce((sum, li) => {
-        const f = FACTORS[li.stream] ?? 0.5;
+        // The admin-editable factor wins; FACTORS below is the shipped default
+        // and the fallback for anything not in the registry yet.
+        const configured = require("./wasteCategories").factorForStream(li.stream);
+        const f = Number.isFinite(configured) ? configured : (FACTORS[li.stream] ?? 0.5);
         return sum + (li.qtyKg || 0) * f;
     }, 0);
 

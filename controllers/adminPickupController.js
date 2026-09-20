@@ -1185,11 +1185,11 @@ const correctWasteData = async (req, res) => {
             });
         }
 
-        // Validate against the model's own stream list so there is one source
-        // of truth for what a waste category may be.
-        const validStreams = new Set(
-            Pickup.schema.path("lineItems").schema.path("stream").enumValues
-        );
+        // Every configured stream, including ones since switched off — a
+        // correction to an old pickup must be able to keep the stream it was
+        // recorded under.
+        const { allStreamKeys } = require("../utils/wasteCategories");
+        const validStreams = new Set(await allStreamKeys());
         const merged = new Map();
         for (let i = 0; i < lineItems.length; i += 1) {
             const item = lineItems[i] || {};

@@ -55,23 +55,12 @@ const { notifyIfEnabled, sendPush } = require("../utils/push");
 const { generateCertNumber } = require("../utils/certNumber");
 const { getIo } = require("../socketHandler");
 
-// Stream enum mirror — kept in sync with Pickup.wasteLineItemSchema.stream.
-// Duplicated here (rather than introspecting the schema) so a typo'd update
-// fails noisily at this layer. If you add a new stream to Pickup.js, add it
-// here too.
-const VALID_STREAMS = new Set([
-    "plastic",
-    "paper",
-    "ewaste",
-    "biomedical",
-    "foam-thermocol",
-    "dry-waste",
-    "agr",
-    "battery",
-    "expired-food",
-    "hazardous",
-    "other",
-]);
+// The waste streams are configurable now (models/WasteCategory.js), so the
+// old hard-coded mirror is gone. recordWasteData reads the registry on each
+// call; this export stays for anything that wants the shipped default list.
+const { CORE_CATEGORIES, activeCategories, refreshCache } =
+    require("../utils/wasteCategories");
+const VALID_STREAMS = new Set(CORE_CATEGORIES.map((c) => c.key));
 
 // Maximum images per status change. Field staff shoot a handful of angles
 // (load, weighbridge display, gate, damage); beyond this it's almost certainly
@@ -575,6 +564,11 @@ const recordWasteData = async (req, res) => {
         // Per spec: duplicate streams are merged (qty summed) with a warning
         // surfaced in the response, NOT a rejection. This is forgiving for
         // supervisors typing on a phone keypad.
+        // Streams come from the admin-editable registry. Corrections to an old
+        // pickup may reference a stream since switched off, so every configured
+        // key is accepted here — switching one off only hides it from the
+        // client's request form.
+        const validStreams = new Set(await require("../utils/wasteCategories").allStreamKeys());
         const merged = new Map();   // stream -> { stream, qtyKg, notes }
         const warnings = [];
         for (let i = 0; i < rawLineItems.length; i += 1) {
@@ -582,9 +576,9 @@ const recordWasteData = async (req, res) => {
             const stream = String(item.stream || "").trim();
             const qtyKg = Number(item.qtyKg);
 
-            if (!stream || !VALID_STREAMS.has(stream)) {
+            if (!stream || !validStreams.has(stream)) {
                 return res.status(400).json({
-                    message: `lineItems[${i}].stream is required and must be one of: ${Array.from(VALID_STREAMS).join(", ")}`,
+                    message: `lineItems[${i}].stream is required and must be one of: ${Array.from(validStreams).join(", ")}`,
                 });
             }
             if (!Number.isFinite(qtyKg) || qtyKg <= 0) {
@@ -815,8 +809,26 @@ const recordWasteData = async (req, res) => {
     }
 };
 
+/**
+ * GET /api/{employee|manager|admin}/my-pickups/waste-categories
+ *
+ * The streams a supervisor may record weights against, so the waste-data form
+ * shows the same list the office configured instead of a bundled copy.
+ */
+const listWasteCategories = async (req, res) => {
+    try {
+        await refreshCache();
+        const items = activeCategories().map((c) => ({ key: c.key, label: c.label }));
+        return res.json({ items, total: items.length });
+    } catch (err) {
+        console.error("listWasteCategories error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listMyPickups,
+    listWasteCategories,
     updatePickupStatus,
     recordWasteData,
     // Prefer `uploadEvidence` in routes — it turns multer failures into clear

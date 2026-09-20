@@ -428,8 +428,30 @@ const listMySites = async (req, res) => {
   }
 };
 
+// GET /api/client/waste-categories
+//
+// The streams a client may ask us to collect. Read from the admin-editable
+// registry so a stream switched off in settings disappears from the request
+// form without a frontend release.
+const listWasteCategories = async (req, res) => {
+  try {
+    const { refreshCache, activeCategories } = require("../utils/wasteCategories");
+    await refreshCache();
+    const items = activeCategories().map((c) => ({
+      key: c.key,
+      label: c.label,
+      description: c.description || undefined,
+    }));
+    return res.json({ items, total: items.length });
+  } catch (err) {
+    console.error("listWasteCategories error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   loginClient,
+  listWasteCategories,
   getMe,
   getDashboard,
   listMyCertificates,

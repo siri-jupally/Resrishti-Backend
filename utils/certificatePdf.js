@@ -358,10 +358,14 @@ const fmtQty = (n) => {
 
 // Aggregate the cert's line items into the 7 template buckets.
 const aggregateByBucket = (lineItems) => {
+    const { bucketForStream } = require("./wasteCategories");
     const totals = Object.create(null);
     for (const li of lineItems || []) {
-        const bucket = STREAM_TO_BUCKET[li.stream];
-        if (!bucket) continue;
+        // Configured categories carry their own bucket; STREAM_TO_BUCKET is the
+        // shipped default. A stream we cannot place still has to appear on the
+        // certificate, so it falls into the general dry-waste row rather than
+        // being dropped — the client handed us that waste either way.
+        const bucket = bucketForStream(li.stream) || STREAM_TO_BUCKET[li.stream] || "other-dry";
         totals[bucket] = (totals[bucket] || 0) + (Number(li.qtyKg) || 0);
     }
     return totals;
