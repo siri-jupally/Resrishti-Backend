@@ -320,6 +320,126 @@ describe("filters", () => {
     });
 });
 
+// ──────────── weight when a category is filtered to ────────────
+//
+// The reported fault: filtering by a category still showed the whole weight of
+// every pickup that happened to contain it, so the headline disagreed with the
+// bar underneath it.
+
+describe("weight under a category filter", () => {
+    beforeEach(async () => {
+        // One mixed pickup: 100 kg plastic + 50 kg paper.
+        await makePickup({
+            requestedAt: MARCH, wasteDataEnteredAt: MARCH, status: "cert-sent",
+            lineItems: [
+                { stream: "plastic", qtyKg: 100 },
+                { stream: "paper", qtyKg: 50 },
+            ],
+            totalKg: 150,
+        });
+        // One plastic-only pickup: 20 kg.
+        await makePickup({
+            requestedAt: MARCH, wasteDataEnteredAt: MARCH, status: "cert-sent",
+            lineItems: [{ stream: "plastic", qtyKg: 20 }],
+            totalKg: 20,
+        });
+    });
+
+    test("the headline is that category's weight, not the pickups' weight", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.kpis.totalWasteKg).toBe(120);   // not 170
+    });
+
+    test("the headline matches the category bar exactly", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.categories).toHaveLength(1);
+        expect(res.body.categories[0].kg).toBe(res.body.kpis.totalWasteKg);
+        expect(res.body.categories[0].share).toBe(100);
+    });
+
+    test("the smaller category is right too", async () => {
+        const res = await overview({ stream: "paper" });
+        expect(res.body.kpis.totalWasteKg).toBe(50);
+        expect(res.body.kpis.weighedPickups).toBe(1);
+    });
+
+    test("CO2e follows the filtered weight", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.kpis.co2eAvoidedKg).toBeCloseTo(120 * 1.5, 1);
+    });
+
+    test("the month series is the filtered weight as well", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.monthly).toHaveLength(1);
+        expect(res.body.monthly[0].kg).toBe(120);
+    });
+
+    test("the page can name the category it is showing", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.filters.streamLabels).toEqual(["Plastic"]);
+    });
+
+    test("pickups are counted per category, not per line", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.categories[0].pickups).toBe(2);
+        expect(res.body.categories[0].averageKgPerPickup).toBe(60);
+    });
+
+    test("the whole weight is still reported alongside, to compare against", async () => {
+        const res = await overview({ stream: "plastic" });
+        expect(res.body.kpis.allCategoriesKg).toBe(170);
+    });
+
+    test("with no filter the headline is every category together", async () => {
+        const res = await overview();
+        expect(res.body.kpis.totalWasteKg).toBe(170);
+        expect(res.body.kpis.weighedPickups).toBe(2);
+        const sum = res.body.categories.reduce((s, c) => s + c.kg, 0);
+        expect(sum).toBe(170);
+    });
+
+    test("shares add up to 100 across the categories", async () => {
+        const res = await overview();
+        const shares = res.body.categories.reduce((s, c) => s + c.share, 0);
+        expect(shares).toBeCloseTo(100, 1);
+    });
+
+    test("each category carries the factor its CO2e was worked out from", async () => {
+        const res = await overview();
+        const plastic = res.body.categories.find((c) => c.stream === "plastic");
+        expect(plastic.factor).toBe(1.5);
+        expect(plastic.co2eKg).toBeCloseTo(plastic.kg * plastic.factor, 1);
+    });
+});
+
+describe("weight recorded without a category", () => {
+    test("is reported rather than quietly missing from the chart", async () => {
+        // Legacy shape: a total with no line items behind it.
+        await makePickup({
+            requestedAt: MARCH, wasteDataEnteredAt: MARCH, status: "cert-sent",
+            lineItems: [], totalKg: 40,
+        });
+        await makePickup({
+            requestedAt: MARCH, wasteDataEnteredAt: MARCH, status: "cert-sent",
+            lineItems: [{ stream: "paper", qtyKg: 10 }], totalKg: 10,
+        });
+        const res = await overview();
+        expect(res.body.kpis.totalWasteKg).toBe(50);
+        expect(res.body.kpis.categorisedKg).toBe(10);
+        expect(res.body.kpis.uncategorisedKg).toBe(40);
+    });
+
+    test("is zero when every kilo has a category", async () => {
+        await makePickup({
+            requestedAt: MARCH, wasteDataEnteredAt: MARCH, status: "cert-sent",
+            lineItems: [{ stream: "paper", qtyKg: 10 }], totalKg: 10,
+        });
+        const res = await overview();
+        expect(res.body.kpis.uncategorisedKg).toBe(0);
+        expect(res.body.kpis.categorisedKg).toBe(res.body.kpis.totalWasteKg);
+    });
+});
+
 // ────────────────────────── month series ────────────────────────────
 
 describe("month series", () => {

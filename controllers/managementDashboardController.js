@@ -112,11 +112,17 @@ const getOverview = async (req, res) => {
 
         await refreshCache();
 
+        // Which categories, if any, the reader has narrowed to. Every weight on
+        // the page is then that category's weight — not the weight of pickups
+        // that happened to include it.
+        const streamFilter = req.query.stream
+            ? (Array.isArray(req.query.stream) ? req.query.stream : [req.query.stream])
+            : null;
+
         const [
             statusCounts,
-            wasteTotals,
-            categoryRows,
-            monthlyWasteRows,
+            pickupTotals,
+            wasteFacet,
             monthlyPickupRows,
             certCounts,
             activeClients,
@@ -128,7 +134,9 @@ const getOverview = async (req, res) => {
                 { $group: { _id: "$status", count: { $sum: 1 } } },
             ]),
 
-            // Weight actually collected, and how many pickups it came from.
+            // Pickup-level weight: what the crews recorded, whole pickups.
+            // Used as the headline when no category filter is on, and as the
+            // check that every kilo has a category.
             Pickup.aggregate([
                 { $match: byWeighed },
                 {
@@ -141,45 +149,69 @@ const getOverview = async (req, res) => {
                 },
             ]),
 
-            // Category-wise summary, from the line items actually recorded.
+            // Everything else about weight comes from one pass over the line
+            // items, so the total, the category split and the monthly trend can
+            // never disagree with each other. Before this, the total summed
+            // whole pickups while the split summed line items: filtering by
+            // Plastic gave a pickup's full 150 kg against a 100 kg plastic bar.
             Pickup.aggregate([
                 { $match: byWeighed },
                 { $unwind: "$lineItems" },
-                ...(req.query.stream
-                    ? [{
-                        $match: {
-                            "lineItems.stream": {
-                                $in: Array.isArray(req.query.stream)
-                                    ? req.query.stream
-                                    : [req.query.stream],
-                            },
-                        },
-                    }]
+                ...(streamFilter
+                    ? [{ $match: { "lineItems.stream": { $in: streamFilter } } }]
                     : []),
                 {
-                    $group: {
-                        _id: "$lineItems.stream",
-                        kg: { $sum: "$lineItems.qtyKg" },
-                        lines: { $sum: 1 },
+                    $facet: {
+                        byMonth: [
+                            {
+                                $group: {
+                                    _id: {
+                                        y: { $year: "$wasteDataEnteredAt" },
+                                        m: { $month: "$wasteDataEnteredAt" },
+                                    },
+                                    kg: { $sum: "$lineItems.qtyKg" },
+                                    pickups: { $addToSet: "$_id" },
+                                },
+                            },
+                            {
+                                $project: {
+                                    kg: 1,
+                                    pickups: { $size: "$pickups" },
+                                },
+                            },
+                            { $sort: { "_id.y": 1, "_id.m": 1 } },
+                        ],
+                        // Two groups: the first folds a pickup's repeated lines
+                        // for one stream together, so the second can count
+                        // pickups rather than lines.
+                        byStream: [
+                            {
+                                $group: {
+                                    _id: { stream: "$lineItems.stream", pickup: "$_id" },
+                                    kg: { $sum: "$lineItems.qtyKg" },
+                                },
+                            },
+                            {
+                                $group: {
+                                    _id: "$_id.stream",
+                                    kg: { $sum: "$kg" },
+                                    pickups: { $sum: 1 },
+                                },
+                            },
+                            { $sort: { kg: -1 } },
+                        ],
+                        overall: [
+                            {
+                                $group: {
+                                    _id: null,
+                                    kg: { $sum: "$lineItems.qtyKg" },
+                                    pickups: { $addToSet: "$_id" },
+                                },
+                            },
+                            { $project: { kg: 1, pickups: { $size: "$pickups" } } },
+                        ],
                     },
                 },
-                { $sort: { kg: -1 } },
-            ]),
-
-            // Month-wise collection trend.
-            Pickup.aggregate([
-                { $match: byWeighed },
-                {
-                    $group: {
-                        _id: {
-                            y: { $year: "$wasteDataEnteredAt" },
-                            m: { $month: "$wasteDataEnteredAt" },
-                        },
-                        kg: { $sum: "$totalKg" },
-                        pickups: { $sum: 1 },
-                    },
-                },
-                { $sort: { "_id.y": 1, "_id.m": 1 } },
             ]),
 
             // Month-wise pickup summary, split into completed vs lost so the
@@ -249,20 +281,51 @@ const getOverview = async (req, res) => {
         const certByStatus = {};
         for (const row of certCounts) certByStatus[row._id] = row.count;
 
-        const waste = wasteTotals[0] || { totalKg: 0, pickups: 0, partial: 0 };
+        const pickupLevel = pickupTotals[0] || { totalKg: 0, pickups: 0, partial: 0 };
+        const facet = wasteFacet[0] || { byMonth: [], byStream: [], overall: [] };
+        const lineLevel = facet.overall[0] || { kg: 0, pickups: 0 };
+
+        // The headline weight answers the question the filters ask. Narrowed to
+        // a category, that is the weight of THAT category; otherwise it is the
+        // whole weight the crews recorded, which also covers any old pickup
+        // that carries a total without a category breakdown.
+        const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+        const totalWasteKg = streamFilter ? lineLevel.kg : pickupLevel.totalKg;
+        const weighedPickups = streamFilter ? lineLevel.pickups : pickupLevel.pickups;
+
+        // Weight recorded without any category against it. Normally zero; if it
+        // is not, the category chart cannot add up to the headline and the page
+        // says so rather than letting the reader find the gap themselves.
+        const uncategorisedKg = streamFilter
+            ? 0
+            : Math.max(0, pickupLevel.totalKg - lineLevel.kg);
 
         // ---- categories, with the configured label and CO2e --------------
         const labels = new Map(activeCategories().map((c) => [c.key, c.label]));
-        const categories = categoryRows.map((row) => ({
-            stream: row._id,
-            label: labels.get(row._id) || row._id,
-            kg: Math.round(row.kg * 10) / 10,
-            lines: row.lines,
-            co2eKg: Math.round(row.kg * factorForStream(row._id) * 10) / 10,
-            share: waste.totalKg > 0 ? Math.round((row.kg / waste.totalKg) * 1000) / 10 : 0,
-        }));
+        const categories = facet.byStream.map((row) => {
+            const factor = factorForStream(row._id);
+            return {
+                stream: row._id,
+                label: labels.get(row._id) || row._id,
+                kg: round1(row.kg),
+                pickups: row.pickups,
+                // kg CO2e avoided per kg, so the arithmetic on screen can be
+                // checked against the factor in Settings.
+                factor,
+                co2eKg: round1(row.kg * factor),
+                // Share of the headline weight, so the percentages on screen
+                // add up to what the total tile shows.
+                share: totalWasteKg > 0 ? Math.round((row.kg / totalWasteKg) * 1000) / 10 : 0,
+                averageKgPerPickup: row.pickups > 0 ? round1(row.kg / row.pickups) : 0,
+            };
+        });
 
-        const co2eAvoidedKg = categories.reduce((sum, c) => sum + c.co2eKg, 0);
+        // Summed before rounding — adding rounded rows drifts by a few hundred
+        // grams per category, which looks like an error on a total.
+        const co2eAvoidedKg = facet.byStream.reduce(
+            (sum, row) => sum + row.kg * factorForStream(row._id),
+            0
+        );
 
         // ---- month series, merged so a month with pickups but no tonnage
         //      (or the reverse) still appears ------------------------------
@@ -276,10 +339,10 @@ const getOverview = async (req, res) => {
             }
             return months.get(key);
         };
-        for (const row of monthlyWasteRows) {
+        for (const row of facet.byMonth) {
             const key = `${row._id.y}-${String(row._id.m).padStart(2, "0")}`;
             const m = touch(key);
-            m.kg = Math.round(row.kg * 10) / 10;
+            m.kg = round1(row.kg);
             m.weighedPickups = row.pickups;
         }
         for (const row of monthlyPickupRows) {
@@ -299,6 +362,12 @@ const getOverview = async (req, res) => {
                 siteId: req.query.siteId || null,
                 stream: req.query.stream || null,
                 status: req.query.status || null,
+                // Names for the categories filtered to, so the page can say
+                // "Plastic only" instead of leaving the reader to assume the
+                // weight covers everything.
+                streamLabels: streamFilter
+                    ? streamFilter.map((s) => labels.get(s) || s)
+                    : null,
             },
             kpis: {
                 activeClients: filteredClients === null ? activeClients : filteredClients,
@@ -308,15 +377,22 @@ const getOverview = async (req, res) => {
                 completedPickups: byStage.completed,
                 failedOrCancelledPickups: byStage.failedOrCancelled,
                 totalPickups,
-                partialPickups: waste.partial,
+                partialPickups: pickupLevel.partial,
                 // Drafted or issued but not yet in the client's hands.
                 pendingCertificates: (certByStatus.draft || 0) + (certByStatus.issued || 0),
                 certificatesIssued: certByStatus.issued || 0,
                 certificatesSent: certByStatus.sent || 0,
                 certificatesCancelled: certByStatus.cancelled || 0,
-                totalWasteKg: Math.round(waste.totalKg * 10) / 10,
-                weighedPickups: waste.pickups,
-                co2eAvoidedKg: Math.round(co2eAvoidedKg * 10) / 10,
+                // With a category filter on, this is that category's weight.
+                totalWasteKg: round1(totalWasteKg),
+                weighedPickups,
+                // Always the whole weight of the matching pickups, so the page
+                // can show what a category is a share OF.
+                allCategoriesKg: round1(pickupLevel.totalKg),
+                categorisedKg: round1(lineLevel.kg),
+                uncategorisedKg: round1(uncategorisedKg),
+                co2eAvoidedKg: round1(co2eAvoidedKg),
+                averageKgPerPickup: weighedPickups > 0 ? round1(totalWasteKg / weighedPickups) : 0,
             },
             byStatus,
             categories,

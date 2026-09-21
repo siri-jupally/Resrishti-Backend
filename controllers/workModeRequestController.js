@@ -73,18 +73,24 @@ const createRequest = async (req, res) => {
             });
         }
 
-        // Overlapping request for the same mode? Approving two would make the
-        // day counts ambiguous, and it is almost always a double submission.
+        // One request per day, whichever mode it is for. Previously this only
+        // looked at the same mode, so the same day could be requested once as
+        // WFH and again as remote — two live requests for one day, with
+        // ambiguous day counts and two approvals to chase.
         const clash = await WorkModeRequest.findOne({
             employee: req.employee._id,
-            workMode,
             status: { $in: ["pending", "approved"] },
             startDate: { $lte: endDate },
             endDate: { $gte: startDate },
         });
         if (clash) {
+            const clashLabel = (MODE_CONFIG[clash.workMode]?.label || clash.workMode)
+                .toLowerCase();
             return res.status(409).json({
-                message: `You already have a ${clash.status} ${config.label.toLowerCase()} request covering ${clash.startDate} to ${clash.endDate}.`,
+                message:
+                    `You already have a ${clash.status} ${clashLabel} request for ` +
+                    `${clash.startDate} to ${clash.endDate}. Cancel it first if you ` +
+                    `need to change those days.`,
             });
         }
 
@@ -315,6 +321,20 @@ const adminReviewRequest = async (req, res) => {
 
         const request = await WorkModeRequest.findById(req.params.id);
         if (!request) return res.status(404).json({ message: "Request not found" });
+
+        // An override changes the decision. Re-applying the decision a request
+        // already has changes nothing and sends the employee a second
+        // notification saying the same thing, so it is refused.
+        if (request.status === status) {
+            return res.status(409).json({
+                message: `This request is already ${status}.`,
+            });
+        }
+        if (request.status === "cancelled") {
+            return res.status(409).json({
+                message: "This request was cancelled by the employee.",
+            });
+        }
 
         await applyDecision({
             request,
