@@ -371,6 +371,65 @@ const getOrgOverview = async (req, res) => {
     }
 };
 
+// GET /api/admin/me/pickup-agent
+// PATCH /api/admin/me/pickup-agent   body: { canSupervise: boolean }
+//
+// Whether the signed-in admin can be assigned to run pickups themselves.
+// The flag has always existed on the Admin model, and the assign-supervisor
+// pool has always read it — but nothing could set it, so the admin's own
+// "My Pickups" tab could never show anything. This is the switch.
+const getMyPickupAgentFlag = async (req, res) => {
+    try {
+        const me = await Admin.findById(req.admin._id).select("canSupervise name email");
+        if (!me) return res.status(404).json({ message: "Admin not found" });
+        return res.json({
+            canSupervise: me.canSupervise === true,
+            name: me.name || me.email,
+        });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+const updateMyPickupAgentFlag = async (req, res) => {
+    try {
+        const { canSupervise } = req.body;
+        if (typeof canSupervise !== "boolean") {
+            return res
+                .status(400)
+                .json({ message: "canSupervise (boolean) is required" });
+        }
+
+        const me = await Admin.findById(req.admin._id);
+        if (!me) return res.status(404).json({ message: "Admin not found" });
+
+        // Switching it off would leave any pickup already assigned to this
+        // admin with a supervisor the pool no longer offers, so say so rather
+        // than stranding the run.
+        if (!canSupervise) {
+            const Pickup = require("../models/Pickup");
+            const live = await Pickup.countDocuments({
+                "supervisor.userId": me._id,
+                status: {
+                    $in: ["accepted", "scheduled", "postponed", "en-route",
+                        "at-client", "picked-up", "at-facility", "weighed"],
+                },
+            });
+            if (live > 0) {
+                return res.status(409).json({
+                    message: `You still have ${live} pickup(s) in progress. Reassign them before stepping down as a pickup agent.`,
+                });
+            }
+        }
+
+        me.canSupervise = canSupervise;
+        await me.save();
+        return res.json({ canSupervise: me.canSupervise, name: me.name || me.email });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     createManager,
     listManagers,
@@ -382,4 +441,6 @@ module.exports = {
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,
+    getMyPickupAgentFlag,
+    updateMyPickupAgentFlag,
 };

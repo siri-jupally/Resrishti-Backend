@@ -22,6 +22,8 @@ const {
     listAllEmployees,
     reassignEmployee,
     updateEmployeePermissions,
+    getMyPickupAgentFlag,
+    updateMyPickupAgentFlag,
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,
@@ -108,6 +110,10 @@ router.patch('/attendance/:id/approve', protect, workAccess.adminApproveEmployee
 router.get('/manager-attendance/pending', protect, workAccess.getPendingManagerAttendance);
 // Make an employee a pickup agent (canSupervise) — see updateEmployeePermissions.
 router.patch('/employees/:id/permissions', protect, updateEmployeePermissions);
+
+// Whether the signed-in admin can be assigned pickups themselves.
+router.get('/me/pickup-agent', protect, getMyPickupAgentFlag);
+router.patch('/me/pickup-agent', protect, updateMyPickupAgentFlag);
 
 // Leave oversight & override
 router.get('/leaves', protect, getAllLeaveRequests);
