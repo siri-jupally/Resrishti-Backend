@@ -149,7 +149,9 @@ const buildCertEmail = (cert, client, pickup) => {
     const revision = Number(cert.revision || 1);
     const revLine = revision > 1 ? ` (Rev ${revision})` : "";
 
-    const portalUrl = `${process.env.CLIENT_URL || "http://localhost:5173"}/client/certificates`;
+    // /client/certificates is not a route — the portal is one page with tabs.
+    // Linking there gave the client a blank screen or a bounce to login.
+    const portalUrl = `${process.env.CLIENT_URL || "http://localhost:5173"}/client/dashboard?tab=certificates`;
     const contactName = (client && client.contactName) || "there";
     const clientName = (cert.clientNameSnapshot || (client && client.name) || "your organization");
 
@@ -408,6 +410,22 @@ const issueCertificate = async (req, res) => {
             });
         }
 
+        // Take the snapshots from the live pickup now, at the moment of
+        // issuing. Until this was here, a draft kept whatever figures it was
+        // created with: a replacement drafted after a weight correction, or
+        // after the certificate it replaces was cancelled, printed the old
+        // weights, because reviseCertificate copies the previous snapshots
+        // forward and nothing ever refreshed them. Issuing is the point where
+        // the numbers are locked, so it is the point where they are read.
+        cert.lineItemsSnapshot = (pickup.lineItems || []).map((li) => ({
+            stream: li.stream,
+            qtyKg: li.qtyKg,
+        }));
+        cert.totalKgSnapshot = pickup.totalKg || 0;
+        cert.clientNameSnapshot = client.name || cert.clientNameSnapshot;
+        cert.pickupDateSnapshot =
+            pickup.scheduledDate || pickup.requestedDate || cert.pickupDateSnapshot;
+
         // Stamp issuedBy BEFORE rendering so the PDF picks up the signatory
         // name. issuedAt is set at the same instant so the PDF's "Date Issued"
         // matches the audit record exactly.
@@ -641,7 +659,7 @@ const sendCertificate = async (req, res) => {
                         title: "Certificate ready",
                         body: `Your certificate ${cert.certNumber} is ready to download.`,
                         icon: "/android-chrome-512x512.png",
-                        data: { url: `/client/certificates` },
+                        data: { url: "/client/dashboard?tab=certificates" },
                     }
                 );
             }
@@ -893,7 +911,7 @@ const cancelCertificate = async (req, res) => {
                         title: "Certificate cancelled",
                         body: `Certificate ${cert.certNumber} is no longer valid. Reason: ${reason}`,
                         icon: "/android-chrome-512x512.png",
-                        data: { url: "/client/certificates" },
+                        data: { url: "/client/dashboard?tab=certificates" },
                     });
                 }
             } catch (notifyErr) {

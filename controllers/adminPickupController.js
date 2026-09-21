@@ -1240,6 +1240,31 @@ const correctWasteData = async (req, res) => {
         });
         await pickup.save();
 
+        // A certificate still in draft has not been shown to anyone, so bring
+        // its figures along with the correction. (Issuing re-reads the pickup
+        // anyway; this keeps the draft's preview and list row honest in the
+        // meantime.) An issued or sent one is left alone — it has to be
+        // revised or cancelled, not quietly rewritten.
+        try {
+            if (pickup.certificate) {
+                const Certificate = require("../models/Certificate");
+                await Certificate.updateOne(
+                    { _id: pickup.certificate, status: "draft" },
+                    {
+                        $set: {
+                            lineItemsSnapshot: corrected.map((li) => ({
+                                stream: li.stream,
+                                qtyKg: li.qtyKg,
+                            })),
+                            totalKgSnapshot: totalKg,
+                        },
+                    }
+                );
+            }
+        } catch (certErr) {
+            console.error("draft cert sync error:", certErr.message);
+        }
+
         const certificateIssued = ["cert-issued", "cert-sent"].includes(pickup.status);
         return res.json({
             pickup,
