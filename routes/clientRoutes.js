@@ -16,5 +16,8 @@ router.delete("/:id", protect, c.deleteClient);
 // Undo an archive. Restores to 'active', or 'pending-onboarding' if the
 // client never finished onboarding — see restoreClient.
 router.post("/:id/restore", protect, c.restoreClient);
+// Internal: set a known password + activate the client (manual onboarding /
+// testing). See setClientPassword. Admin-protected like the rest of this file.
+router.post("/:id/set-password", protect, c.setClientPassword);
 
 module.exports = router;

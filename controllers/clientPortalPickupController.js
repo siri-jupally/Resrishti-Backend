@@ -24,26 +24,14 @@
   3-attempt retry loop to absorb the rare collision (same pattern as
   managerController.createTask). See `generatePickupId` below.
 */
-const crypto = require("crypto");
 const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
-const Site = require("../models/Site");
 const Admin = require("../models/Admin");
 const Manager = require("../models/Manager");
 const { sendPush } = require("../utils/push");
-
-// Mirrors generateTaskId in controllers/managerController.js but emits PU-... ids.
-// Using crypto.randomBytes instead of Math.random gives a higher-entropy 6-char
-// hex tail, which keeps collision odds vanishingly small even at high volume.
-const generatePickupId = () => {
-    const d = new Date();
-    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(
-        2,
-        "0"
-    )}${String(d.getDate()).padStart(2, "0")}`;
-    const rand = crypto.randomBytes(3).toString("hex").toUpperCase();
-    return `PU-${ymd}-${rand}`;
-};
+// Single shared pickup-creation path (also used by the staff "create on behalf"
+// flow). requestPickup delegates to it so both paths stay identical.
+const { createPickupForClient, PickupCreationError } = require("../services/pickupCreation");
 
 // Certificate-workflow stages that are internal to Resrishti. A certificate
 // sitting in draft or awaiting manager review is not something the client
@@ -73,198 +61,25 @@ const maskPickupForClient = (doc) => {
     return p;
 };
 
-// What a client may request today. Read from the configurable registry (see
-// models/WasteCategory.js) rather than a hard-coded list, so switching a
-// stream off in admin settings takes it off the request form immediately.
-const { activeStreamKeys } = require("../utils/wasteCategories");
-
-// Address of the specific location a pickup is for, when the client picked one.
-const formatSiteAddress = (site) => {
-    const a = (site && site.address) || {};
-    return [a.line1, a.line2, a.city, a.state, a.postalCode, a.country]
-        .filter(Boolean)
-        .join(", ");
-};
-
-// Build a human-readable address string from the client's billingAddress
-// object. Snapshotting it onto the pickup ensures the audit trail / cert PDF
-// stays stable even if the client's address changes later.
-const formatPickupAddress = (client) => {
-    const a = client.billingAddress || {};
-    return [a.line1, a.line2, a.city, a.state, a.postalCode, a.country]
-        .filter(Boolean)
-        .join(", ");
-};
-
 // POST /api/client/pickups
+// Thin wrapper over the shared createPickupForClient service (see
+// services/pickupCreation.js). Behaviour is unchanged: validates, creates the
+// pickup linked to req.client at status "requested", and notifies coordinators.
 const requestPickup = async (req, res) => {
     try {
         const { requestedDate, requestedStreams, clientNotes, siteId } = req.body;
-
-        // --- validation ---------------------------------------------------
-        if (
-            !Array.isArray(requestedStreams) ||
-            requestedStreams.length === 0
-        ) {
-            return res
-                .status(400)
-                .json({ message: "requestedStreams must be a non-empty array" });
-        }
-        const allowedStreams = await activeStreamKeys();
-        const invalidStream = requestedStreams.find(
-            (s) => !allowedStreams.includes(s)
-        );
-        if (invalidStream) {
-            return res
-                .status(400)
-                .json({ message: `Invalid stream: ${invalidStream}` });
-        }
-
-        // requestedDate must parse AND be today-or-future.
-        if (!requestedDate) {
-            return res.status(400).json({ message: "requestedDate is required" });
-        }
-        const rd = new Date(requestedDate);
-        if (Number.isNaN(rd.getTime())) {
-            return res
-                .status(400)
-                .json({ message: "requestedDate is not a valid date" });
-        }
-        // Compare on calendar-day boundary so a same-day request submitted in
-        // the afternoon doesn't get rejected just because Date.now() > 00:00.
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const rdDay = new Date(rd);
-        rdDay.setHours(0, 0, 0, 0);
-        if (rdDay.getTime() < today.getTime()) {
-            return res
-                .status(400)
-                .json({ message: "requestedDate cannot be in the past" });
-        }
-
-        // --- location -----------------------------------------------------
-        // Clients with several buildings say which one this pickup is for.
-        // Optional: single-location clients have no Sites at all, and those
-        // pickups fall back to the client's billing address as before.
-        let site = null;
-        if (siteId) {
-            if (!mongoose.Types.ObjectId.isValid(siteId)) {
-                return res.status(400).json({ message: "Invalid location" });
-            }
-            site = await Site.findOne({
-                _id: siteId,
-                client: req.client._id,
-                isActive: true,
-            });
-            if (!site) {
-                return res.status(404).json({ message: "Location not found" });
-            }
-        }
-
-        // --- soft duplicate warning ---------------------------------------
-        // Admin sees this in the queue; we don't block — they decide.
-        try {
-            const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000);
-            const recent = await Pickup.findOne({
-                client: req.client._id,
-                createdAt: { $gte: tenMinAgo },
-                requestedStreams: { $in: requestedStreams },
-            }).select("_id pickupID");
-            if (recent) {
-                console.warn(
-                    `[pickup] Possible duplicate request from client ${req.client._id} — recent pickup ${recent.pickupID} (${recent._id}) within last 10 min with overlapping streams.`
-                );
-            }
-        } catch (e) {
-            // Non-fatal — just log and proceed.
-            console.error("Duplicate-warn lookup failed:", e.message);
-        }
-
-        // --- create with pickupID retry loop ------------------------------
-        // Same 3-attempt pattern as managerController.createTask. After 3
-        // unique-collisions we bail; in practice 6-hex/day collisions are
-        // ~1-in-16M so a single attempt almost always succeeds.
-        let pickup = null;
-        let lastErr = null;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-            const pickupID = generatePickupId();
-            try {
-                // eslint-disable-next-line no-await-in-loop
-                pickup = await Pickup.create({
-                    pickupID,
-                    client: req.client._id,
-                    clientNameSnapshot: req.client.name,
-                    site: site ? site._id : null,
-                    siteNameSnapshot: site ? site.name : undefined,
-                    pickupAddressSnapshot: site
-                        ? formatSiteAddress(site)
-                        : formatPickupAddress(req.client),
-                    requestedDate: rd,
-                    requestedStreams,
-                    clientNotes,
-                    status: "requested",
-                });
-                break;
-            } catch (err) {
-                lastErr = err;
-                // Mongo dup-key on pickupID → retry. Anything else → rethrow.
-                if (err && err.code === 11000 && err.keyPattern?.pickupID) {
-                    continue;
-                }
-                throw err;
-            }
-        }
-        if (!pickup) {
-            console.error("Failed to generate pickupID after 3 attempts:", lastErr);
-            return res
-                .status(500)
-                .json({ message: "Failed to generate pickupID" });
-        }
-
-        // --- notify coordinators ------------------------------------------
-        // Admins + Managers with canCoordinate=true AND a push subscription.
-        // sendPush is fire-and-forget per recipient; we don't await the array
-        // because a slow push provider shouldn't delay the API response.
-        try {
-            const [admins, managers] = await Promise.all([
-                Admin.find({
-                    canCoordinate: true,
-                    pushSubscription: { $exists: true, $ne: null },
-                })
-                    .select("pushSubscription")
-                    .lean(),
-                Manager.find({
-                    canCoordinate: true,
-                    pushSubscription: { $exists: true, $ne: null },
-                })
-                    .select("pushSubscription")
-                    .lean(),
-            ]);
-            const recipients = [...admins, ...managers];
-            const payload = {
-                title: "New Pickup Request",
-                body: `${req.client.name} requested pickup of ${requestedStreams.join(
-                    ", "
-                )}`,
-                icon: "/android-chrome-512x512.png",
-                tag: `pickup-new-${pickup._id}`,
-                data: {
-                    url: `/admin/dashboard?tab=pickups&id=${pickup._id}`,
-                },
-            };
-            // Fire-and-forget — same pattern as createTask. Errors logged in sendPush.
-            await Promise.all(
-                recipients
-                    .filter((r) => r.pushSubscription)
-                    .map((r) => sendPush(r.pushSubscription, payload))
-            );
-        } catch (e) {
-            // Push delivery failures must not break pickup creation.
-            console.error("Coordinator push notify failed:", e.message);
-        }
-
+        const pickup = await createPickupForClient({
+            client: req.client,
+            requestedDate,
+            requestedStreams,
+            clientNotes,
+            siteId,
+        });
         return res.status(201).json(pickup);
     } catch (err) {
+        if (err instanceof PickupCreationError) {
+            return res.status(err.status).json({ message: err.message });
+        }
         console.error("requestPickup error:", err);
         return res.status(500).json({ message: err.message });
     }

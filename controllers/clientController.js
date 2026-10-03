@@ -20,6 +20,7 @@ const mongoose = require("mongoose");
 const Client = require("../models/Client");
 const OnboardingToken = require("../models/OnboardingToken");
 const { issueOnboardingToken } = require("./onboardingController");
+const { isClientOnboardingEnabled } = require("../utils/onboardingFlag");
 
 // ==================== CREATE ====================
 
@@ -72,14 +73,19 @@ const createClient = async (req, res) => {
         // Fire-and-handle: generate onboarding token + email the magic link.
         // We wrap in its own try so an SMTP outage doesn't fail the create —
         // admin can always click "Resend Onboarding" if the email didn't go.
+        // Skipped entirely while client onboarding is temporarily disabled, so
+        // no dead magic-link emails go out; admins activate clients via
+        // setClientPassword instead. Re-enabling the flag restores this.
         let onboarding = { emailSent: false, expiresAt: null };
-        try {
-            onboarding = await issueOnboardingToken(
-                client,
-                req.admin && req.admin._id
-            );
-        } catch (onboardErr) {
-            console.error("Onboarding email error (non-fatal):", onboardErr.message);
+        if (isClientOnboardingEnabled()) {
+            try {
+                onboarding = await issueOnboardingToken(
+                    client,
+                    req.admin && req.admin._id
+                );
+            } catch (onboardErr) {
+                console.error("Onboarding email error (non-fatal):", onboardErr.message);
+            }
         }
 
         return res.status(201).json({
@@ -310,6 +316,63 @@ const restoreClient = async (req, res) => {
     }
 };
 
+// ==================== SET PASSWORD (internal / testing) ====================
+
+// POST /api/admin/clients/:id/set-password  — admin-only.
+//
+// Internal mechanism to make a client immediately usable without the email
+// magic link. Needed while client onboarding is disabled (createClient no
+// longer emails an invite), and useful for operational/testing access.
+//
+// Sets a known password and ACTIVATES the client in one step:
+//   passwordHash (pre-save hook hashes it) + isOnboardingComplete + status.
+// This mirrors what completeOnboarding would have done, so the client can then
+// sign in normally at /client/login. It does NOT expose or return the password.
+const setClientPassword = async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid client id" });
+        }
+
+        const cleaned = String(req.body && req.body.password != null ? req.body.password : "").trim();
+        if (cleaned.length < 6) {
+            return res.status(400).json({
+                message: "Password must be at least 6 characters (non-whitespace)",
+            });
+        }
+
+        const client = await Client.findById(req.params.id).select("+passwordHash");
+        if (!client) {
+            return res.status(404).json({ message: "Client not found" });
+        }
+        // Don't silently resurrect an archived client. Admin should restore first.
+        if (client.status === "churned") {
+            return res.status(409).json({
+                message: "Restore the archived client before setting a password",
+            });
+        }
+
+        // Assigning the plaintext triggers the model's pre-save bcrypt hook and
+        // stamps passwordChangedAt (which invalidates older JWTs).
+        client.passwordHash = cleaned;
+        client.isOnboardingComplete = true;
+        if (client.status === "pending-onboarding") {
+            client.status = "active";
+        }
+        await client.save();
+
+        return res.json({
+            ok: true,
+            clientId: client._id,
+            email: client.contactEmail,
+            status: client.status,
+            isOnboardingComplete: client.isOnboardingComplete,
+        });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     createClient,
     listClients,
@@ -317,4 +380,5 @@ module.exports = {
     updateClient,
     deleteClient,
     restoreClient,
+    setClientPassword,
 };

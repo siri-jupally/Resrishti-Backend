@@ -44,8 +44,15 @@
 */
 
 const multer = require("multer");
+const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
 const Client = require("../models/Client");
+// Shared pickup-creation path, so a staff-created pickup is identical to a
+// client self-requested one (same validation, status, snapshots, notifications).
+const {
+    createPickupForClient,
+    PickupCreationError,
+} = require("../services/pickupCreation");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
 const Admin = require("../models/Admin");
@@ -170,12 +177,14 @@ const ALLOWED_NEXT = {
 
 // Statuses that REQUIRE a photo evidence on transition. Other statuses
 // (postponed, scheduled) accept the call with no photo.
+// Simplified to the three operational captures (Empty Truck / Fully Loaded /
+// Weight Slip). en-route and at-facility are now photo-OPTIONAL confirm steps —
+// the backend still accepts photo-less transitions for anything not listed here.
+// Mirrored on the frontend by PHOTO_REQUIRED in lib/pickupStatus.js.
 const PHOTO_REQUIRED_FOR = new Set([
-    "en-route",
-    "at-client",
-    "picked-up",
-    "at-facility",
-    "weighed",
+    "at-client",   // Empty Truck
+    "picked-up",   // Fully Loaded Truck
+    "weighed",     // Weight Slip
 ]);
 
 // Outcomes that end the pickup in the field. There is no photo and no weight
@@ -826,11 +835,97 @@ const listWasteCategories = async (req, res) => {
     }
 };
 
+// ==================== CREATE ON BEHALF OF CLIENT ====================
+//
+// Lets an authorized Pickup Agent (canSupervise:true) originate a pickup for an
+// existing client — the temporary workaround while client self-onboarding is
+// off. Reuses the shared createPickupForClient service so the result is
+// indistinguishable from a client-requested pickup (status "requested", no
+// supervisor, appears in the client's portal, flows through normal triage).
+
+// GET /api/{role}/my-pickups/clients?search=&limit=
+// Slim client list for the "select existing client" picker. Pickup-agent gated.
+const listClientsForPickup = async (req, res) => {
+    try {
+        const me = getCurrentUser(req);
+        if (!me || !me.doc || me.doc.canSupervise !== true) {
+            return res.status(403).json({ message: "Pickup agent access required" });
+        }
+        const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+        const filter = { status: { $ne: "churned" } };
+        if (req.query.search) {
+            const safe = String(req.query.search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const rx = new RegExp(safe, "i");
+            filter.$or = [
+                { name: rx },
+                { contactName: rx },
+                { contactEmail: rx },
+                { contactPhone: rx },
+            ];
+        }
+        const items = await Client.find(filter)
+            .select("name contactName contactEmail contactPhone status")
+            .sort({ name: 1 })
+            .limit(limit)
+            .lean();
+        return res.json({ items });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// POST /api/{role}/my-pickups  { clientId, requestedDate, requestedStreams, clientNotes?, siteId? }
+const createPickupOnBehalf = async (req, res) => {
+    try {
+        const me = getCurrentUser(req);
+        if (!me || !me.doc || me.doc.canSupervise !== true) {
+            return res.status(403).json({ message: "Pickup agent access required" });
+        }
+        const { clientId } = req.body;
+        if (!clientId || !mongoose.Types.ObjectId.isValid(clientId)) {
+            return res.status(400).json({ message: "A valid clientId is required" });
+        }
+        const client = await Client.findById(clientId);
+        if (!client) {
+            return res.status(404).json({ message: "Client not found" });
+        }
+        if (client.status === "churned") {
+            return res.status(409).json({ message: "Cannot create a pickup for an archived client" });
+        }
+
+        const pickup = await createPickupForClient({
+            client,
+            requestedDate: req.body.requestedDate,
+            requestedStreams: req.body.requestedStreams,
+            clientNotes: req.body.clientNotes,
+            siteId: req.body.siteId,
+            createdByActor: {
+                userType: me.userType,
+                userId: me.userId,
+                name: me.name,
+                phone: me.doc && me.doc.phone,
+            },
+            // Auto-accept + self-assign to the creating Pickup Agent so it lands
+            // straight in their My Pickups, ready to execute (no triage step).
+            assignToActor: true,
+        });
+        return res.status(201).json(pickup);
+    } catch (err) {
+        if (err instanceof PickupCreationError) {
+            return res.status(err.status).json({ message: err.message });
+        }
+        console.error("createPickupOnBehalf error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listMyPickups,
     listWasteCategories,
     updatePickupStatus,
     recordWasteData,
+    listClientsForPickup,
+    createPickupOnBehalf,
     // Prefer `uploadEvidence` in routes — it turns multer failures into clear
     // 400s. `upload` stays exported for anything that wants the raw middleware.
     uploadEvidence,

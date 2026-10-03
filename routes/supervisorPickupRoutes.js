@@ -30,10 +30,18 @@ const ctrl = require("../controllers/supervisorPickupController");
  *                              req.manager / req.admin on the request.
  * @returns {express.Router}
  */
-const factory = (roleAuth) => {
+const factory = (roleAuth, opts = {}) => {
     const r = express.Router();
     // Literal path first, so it is not read as a pickup id.
     r.get("/waste-categories", roleAuth, ctrl.listWasteCategories);
+    // Pickup Agent "create pickup for an existing client" — only mounted where
+    // opts.allowCreate is set (employee prefix today; managers/admins can be
+    // enabled later by passing the flag). Handlers also enforce canSupervise.
+    // Literal "/clients" before the "/" list route.
+    if (opts.allowCreate) {
+        r.get("/clients", roleAuth, ctrl.listClientsForPickup);
+        r.post("/", roleAuth, ctrl.createPickupOnBehalf);
+    }
     r.get("/", roleAuth, ctrl.listMyPickups);
     // ctrl.uploadEvidence parses the multipart form before updatePickupStatus
     // runs, and converts multer failures (too many files, oversized image,

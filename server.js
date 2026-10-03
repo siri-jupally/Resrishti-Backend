@@ -249,15 +249,19 @@ app.use("/api/client/onboarding", onboardingRoutes.publicRouter);
 const supervisorPickupRoutes = require("./routes/supervisorPickupRoutes");
 app.use(
   "/api/employee/my-pickups",
-  supervisorPickupRoutes(require("./middleware/authEmployee").protectEmployee)
+  // allowCreate: employee Pickup Agents (canSupervise) can originate a pickup
+  // for an existing client. Manager/admin mounts below intentionally omit it.
+  supervisorPickupRoutes(require("./middleware/authEmployee").protectEmployee, { allowCreate: true })
 );
 app.use(
   "/api/manager/my-pickups",
-  supervisorPickupRoutes(require("./middleware/authManager").protectManager)
+  // Managers with canSupervise (Pickup Agent) can also create pickups for clients.
+  supervisorPickupRoutes(require("./middleware/authManager").protectManager, { allowCreate: true })
 );
 app.use(
   "/api/admin/my-pickups",
-  supervisorPickupRoutes(require("./middleware/authMiddleware").protect)
+  // Admins with canSupervise (Pickup Agent) can also create pickups for clients.
+  supervisorPickupRoutes(require("./middleware/authMiddleware").protect, { allowCreate: true })
 );
 
 // Client Management module — manager/coordinator certificate workflow
