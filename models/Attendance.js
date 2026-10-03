@@ -107,6 +107,10 @@ const attendanceSchema = new mongoose.Schema(
 );
 
 // One attendance record per employee per date
+// A locked month refuses every write — see utils/attendanceLock.js. Sitting on
+// the schema rather than in each controller means no write path can miss it.
+require("../utils/attendanceLock").applyLockGuard(attendanceSchema);
+
 attendanceSchema.index({ employee: 1, date: 1 }, { unique: true });
 attendanceSchema.index({ date: 1 });
 attendanceSchema.index({ employee: 1, status: 1 });

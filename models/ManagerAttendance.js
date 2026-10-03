@@ -89,6 +89,10 @@ const managerAttendanceSchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+// Managers are on the same payroll clock as everyone else, so a locked month
+// refuses their attendance writes too. See utils/attendanceLock.js.
+require("../utils/attendanceLock").applyLockGuard(managerAttendanceSchema);
+
 managerAttendanceSchema.index({ manager: 1, date: 1 }, { unique: true });
 managerAttendanceSchema.index({ date: 1 });
 managerAttendanceSchema.index({ manager: 1, status: 1 });

@@ -6,6 +6,7 @@ const Attendance = require("../models/Attendance");
 const Admin = require("../models/Admin");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { applyJobRole } = require("./workAccessController");
+const { lockBlocksRange } = require("../utils/attendanceLock");
 
 // ==================== MANAGER CRUD ====================
 
@@ -270,6 +271,13 @@ const adminReviewLeave = async (req, res) => {
         if (!leave) {
             return res.status(404).json({ message: "Leave request not found" });
         }
+
+        // An admin override writes the same 'leave' rows a manager approval
+        // would, so it answers to the same lock.
+        const leaveBlocked = await lockBlocksRange(
+            leave.startDate, leave.endDate, "this leave"
+        );
+        if (leaveBlocked) return res.status(409).json(leaveBlocked.body);
 
         const previousStatus = leave.status;
         leave.status = status;
