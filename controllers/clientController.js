@@ -118,7 +118,17 @@ const listClients = async (req, res) => {
         const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
         const filter = {};
-        if (status) filter.status = status;
+        if (status) {
+            filter.status = status;
+        } else {
+            // Archived clients are hidden unless they are asked for by name
+            // (status=churned). Deleting a client and still seeing it in the
+            // list reads as the delete having failed, which is what admins
+            // were reporting. They remain reachable through the status filter
+            // and restorable, because archiving is reversible and a hard
+            // delete of a client with history is not.
+            filter.status = { $ne: "churned" };
+        }
 
         if (search) {
             // Case-insensitive partial match across name / contactEmail / contactPhone.
@@ -235,9 +245,28 @@ const updateClient = async (req, res) => {
     }
 };
 
-// ==================== DELETE (soft) ====================
+// ==================== DELETE ====================
 
-// DELETE /api/admin/clients/:id  — soft-delete only (sets status='churned')
+// DELETE /api/admin/clients/:id
+//
+// Deletes the client outright when there is nothing of record attached to it,
+// and archives it (status='churned') when there is.
+//
+// The split exists because the two cases are genuinely different. A client
+// created by mistake, or to try something out, has no pickups and no
+// certificates — nothing refers to it, so removing it is clean and an admin who
+// pressed Delete should get a delete. A client with pickups, certificates or
+// reports behind it cannot be removed: certificates are documents the client
+// has already been sent, and reports and the GHG figures are computed from
+// those pickups. Deleting the row would leave those pointing at nothing, so
+// that client is archived instead — and, since this change, hidden from the
+// list, which is the part that made archiving look broken.
+//
+// Sites and the client's own invite / reset tokens are not history; they belong
+// to the client and go with it.
+//
+// Responses: { ok: true, mode: 'deleted' } or
+//            { ok: true, mode: 'archived', references: { pickups, certificates, reports } }
 const deleteClient = async (req, res) => {
     try {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -249,8 +278,33 @@ const deleteClient = async (req, res) => {
             return res.status(404).json({ message: "Client not found" });
         }
 
-        // Hard delete is intentionally out of scope (clients have historical
-        // pickups + certificates referencing them; orphaning those is unsafe).
+        // Anything here makes the client un-deletable. Required lazily, in step
+        // with the rest of this controller, to keep the model graph from
+        // becoming load-order sensitive.
+        const Pickup = require("../models/Pickup");
+        const Certificate = require("../models/Certificate");
+        const Report = require("../models/Report");
+        const [pickups, certificates, reports] = await Promise.all([
+            Pickup.countDocuments({ client: client._id }),
+            Certificate.countDocuments({ client: client._id }),
+            Report.countDocuments({ client: client._id }),
+        ]);
+
+        if (pickups === 0 && certificates === 0 && reports === 0) {
+            const Site = require("../models/Site");
+            const PasswordResetToken = require("../models/PasswordResetToken");
+            // The client's own subordinate records. Removed first so a failure
+            // part-way through leaves the client in place rather than leaving
+            // orphans with no client to find them from.
+            await Promise.all([
+                Site.deleteMany({ client: client._id }),
+                OnboardingToken.deleteMany({ client: client._id }),
+                PasswordResetToken.deleteMany({ client: client._id }),
+            ]);
+            await Client.deleteOne({ _id: client._id });
+            return res.json({ ok: true, mode: "deleted" });
+        }
+
         client.status = "churned";
         await client.save();
 
@@ -265,7 +319,11 @@ const deleteClient = async (req, res) => {
             { expiresAt: new Date() }
         );
 
-        return res.json({ ok: true });
+        return res.json({
+            ok: true,
+            mode: "archived",
+            references: { pickups, certificates, reports },
+        });
     } catch (err) {
         return res.status(500).json({ message: err.message });
     }
