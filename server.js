@@ -203,6 +203,17 @@ mongoose
     } catch (e) {
       console.error("Waste category init:", e.message);
     }
+
+    // Payroll settings and the paid-day policies the engine needs.
+    try {
+      const { initPayroll } = require("./utils/payrollDefaults");
+      const seeded = await initPayroll();
+      if (seeded > 0) {
+        console.log(`Seeded ${seeded} paid-day polic${seeded === 1 ? "y" : "ies"}`);
+      }
+    } catch (e) {
+      console.error("Payroll init:", e.message);
+    }
   })
   .catch((err) => console.error("MongoDB Connection Error:", err));
 
@@ -226,6 +237,9 @@ app.use("/api/client/pickups", require("./routes/clientPortalPickupRoutes"));
 app.use("/api/admin/pickups", require("./routes/adminPickupRoutes"));
 // Admin-editable waste stream list + CO2e factors.
 app.use("/api/admin/waste-categories", require("./routes/wasteCategoryRoutes"));
+// Payroll — profiles, settings, paid-day policies and accountant logins.
+app.use("/api/payroll", require("./routes/payrollRoutes"));
+
 // Operational KPIs for the admin dashboard.
 app.use("/api/admin/dashboard", require("./routes/managementDashboardRoutes"));
 // Supervisor pool — exposed at the spec'd path /api/admin/supervisor-pool.

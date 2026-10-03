@@ -100,5 +100,12 @@ router.post("/location/batch", protectEmployee, employeeBatchLocations);
 
 router.post("/subscribe", protectEmployee, subscribe);
 
+
+// ---- payslips -------------------------------------------------------------
+// Their own, and only once released. The download streams through this
+// server rather than handing out a storage link — see payslipController.
+const payslips = require("../controllers/payslipController");
+router.get("/payslips", protectEmployee, payslips.listMyPayslips);
+router.get("/payslips/:lineId/download", protectEmployee, payslips.downloadMyPayslip);
 module.exports = router;
 

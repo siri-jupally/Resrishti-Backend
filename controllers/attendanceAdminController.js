@@ -13,6 +13,7 @@ const AttendancePolicy = require("../models/AttendancePolicy");
 const Attendance = require("../models/Attendance");
 const Employee = require("../models/Employee");
 const { summariseWorked } = require("../utils/attendanceCounting");
+const { lockBlocks } = require("../utils/attendanceLock");
 
 // GET /api/admin/attendance/policy
 const getPolicy = async (req, res) => {
@@ -118,6 +119,11 @@ const addHoliday = async (req, res) => {
 
         policy.holidays.push({ date, name, type: type || "public" });
         await policy.save();
+
+        // Declaring a holiday rewrites every attendance row on that date, which
+        // would rewrite pay in a month already closed.
+        const holidayBlocked = await lockBlocks(date, "this date");
+        if (holidayBlocked) return res.status(409).json(holidayBlocked.body);
 
         // Mark attendance records for this date as 'holiday'
         await Attendance.updateMany(

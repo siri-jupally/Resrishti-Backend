@@ -72,6 +72,16 @@ router.route('/testimonials/:id')
     .delete(protect, deleteTestimonial);
 
 // Attendance policy & reports routes
+// Attendance month lock — payroll may only compute on a closed month, and a
+// closed month refuses every attendance write. See utils/attendanceLock.js.
+const attendanceLock = require('../controllers/attendanceLockController');
+router.get('/attendance/locks', protect, attendanceLock.listLocks);
+router.get('/attendance/locks/:month', protect, attendanceLock.getLock);
+// Every unresolved record standing between the month and being closed.
+router.get('/attendance/locks/:month/issues', protect, require('../controllers/attendanceLockIssues').getMonthIssues);
+router.post('/attendance/locks/:month/lock', protect, attendanceLock.lockMonth);
+router.post('/attendance/locks/:month/reopen', protect, attendanceLock.reopenMonth);
+
 router.get('/attendance/policy', protect, getPolicy);
 router.put('/attendance/policy', protect, updatePolicy);
 router.post('/attendance/policy/holidays', protect, addHoliday);

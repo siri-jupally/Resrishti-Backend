@@ -130,4 +130,11 @@ router.get("/location/trail/:employeeId/:date", protectManager, getEmployeeTrail
 
 router.post("/subscribe", protectManager, subscribe);
 
+
+// ---- payslips -------------------------------------------------------------
+// Their own, and only once released. The download streams through this
+// server rather than handing out a storage link — see payslipController.
+const payslips = require("../controllers/payslipController");
+router.get("/payslips", protectManager, payslips.listMyPayslips);
+router.get("/payslips/:lineId/download", protectManager, payslips.downloadMyPayslip);
 module.exports = router;

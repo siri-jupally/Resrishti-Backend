@@ -21,6 +21,7 @@ const Admin = require("../models/Admin");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { isWeekOff } = require("../utils/attendanceDays");
 const { summariseWorked } = require("../utils/attendanceCounting");
+const { lockBlocks, lockBlocksRange } = require("../utils/attendanceLock");
 const { resolveAllowedWorkModes } = require("../utils/workModePermissions");
 
 // GET /api/manager/attendance/team?date=YYYY-MM-DD
@@ -198,6 +199,11 @@ const approveAttendance = async (req, res) => {
             return res.status(404).json({ message: "Attendance record not found" });
         }
 
+        // Approving or rejecting moves the day in and out of worked totals, so
+        // it changes the month's pay figures.
+        const approvalBlocked = await lockBlocks(attendance.date, "this attendance");
+        if (approvalBlocked) return res.status(409).json(approvalBlocked.body);
+
         // Verify manager owns this employee
         if (String(attendance.employee.manager) !== String(req.manager._id)) {
             return res.status(403).json({ message: "Not authorized" });
@@ -320,6 +326,10 @@ const reviewCorrection = async (req, res) => {
             return res.status(403).json({ message: "Not authorized" });
         }
 
+        // Approving rewrites — or creates — the attendance row for that date.
+        const correctionBlocked = await lockBlocks(correction.date, "this attendance");
+        if (correctionBlocked) return res.status(409).json(correctionBlocked.body);
+
         correction.status = status;
         correction.reviewedBy = req.manager._id;
         if (reviewRemarks) correction.reviewRemarks = reviewRemarks;
@@ -438,6 +448,13 @@ const reviewLeave = async (req, res) => {
         if (String(leave.employee.manager) !== String(req.manager._id)) {
             return res.status(403).json({ message: "Not authorized" });
         }
+
+        // Approving writes 'leave' rows across the whole range, so a locked
+        // month anywhere in that span refuses before anything is saved.
+        const leaveBlocked = await lockBlocksRange(
+            leave.startDate, leave.endDate, "this leave"
+        );
+        if (leaveBlocked) return res.status(409).json(leaveBlocked.body);
 
         leave.status = status;
         leave.reviewedBy = req.manager._id;
