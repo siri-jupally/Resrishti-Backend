@@ -24,6 +24,15 @@ const subscribe = async (req, res) => {
             return res.status(200).json({ message: "Manager subscribed successfully" });
         }
 
+        // Admins are the default coordinators (canCoordinate:true) — without this
+        // branch they could never store a pushSubscription, so every coordinator
+        // push silently reached zero admins.
+        if (req.admin) {
+            req.admin.pushSubscription = subscription;
+            await req.admin.save();
+            return res.status(200).json({ message: "Admin subscribed successfully" });
+        }
+
         return res.status(401).json({ message: "Not authorized to subscribe" });
     } catch (err) {
         console.error("Subscription Error:", err);

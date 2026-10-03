@@ -30,6 +30,18 @@ const initSocket = (server) => {
             console.log(`Socket ${socket.id} left room: task_${taskId}`);
         });
 
+        // Join a specific pickup room so pickup/certificate status changes
+        // (io.to(`pickup_<id>`).emit("pickup:status-updated")) reach the open
+        // detail/timeline views live, without a page refresh.
+        socket.on("joinPickupRoom", (pickupId) => {
+            socket.join(`pickup_${pickupId}`);
+            console.log(`Socket ${socket.id} joined room: pickup_${pickupId}`);
+        });
+
+        socket.on("leavePickupRoom", (pickupId) => {
+            socket.leave(`pickup_${pickupId}`);
+        });
+
         socket.on("disconnect", () => {
             console.log(`Client disconnected: ${socket.id}`);
         });

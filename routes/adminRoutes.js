@@ -54,6 +54,7 @@ const workModeRequests = require('../controllers/workModeRequestController');
 const staffReset = require('../controllers/staffPasswordResetController');
 const workAccess = require('../controllers/workAccessController');
 const { protect } = require('../middleware/authMiddleware');
+const { subscribe } = require('../controllers/notificationController');
 
 router.post('/login', loginAdmin);
 
@@ -63,6 +64,10 @@ router.post('/forgot-password', staffReset.forgotPassword('admin'));
 router.get('/reset-password/:token', staffReset.verifyResetToken('admin'));
 router.post('/reset-password', staffReset.resetPassword('admin'));
 router.post('/seed', seedAdmin); // Remove or protect in production
+
+// Web Push subscription for admins (default coordinators) — so new-pickup and
+// certificate-ready notifications actually reach them.
+router.post('/subscribe', protect, subscribe);
 
 router.route('/testimonials')
     .get(protect, getAllTestimonials);
