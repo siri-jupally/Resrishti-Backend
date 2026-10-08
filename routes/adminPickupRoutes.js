@@ -18,6 +18,7 @@ const {
     rejectPickup,
     reassignSupervisor,
     cancelPickup,
+    deletePickup,
     reschedulePickup,
     correctWasteData,
     getSupervisorPool,
@@ -37,6 +38,10 @@ router.patch("/:id/accept", protectTriage, acceptPickup);
 router.patch("/:id/reject", protectTriage, rejectPickup);
 router.patch("/:id/reassign-supervisor", protectTriage, reassignSupervisor);
 router.patch("/:id/cancel", protectTriage, cancelPickup);
+// Permanent, and refused once a certificate has been issued — see the handler.
+// Cancel is the right tool for a collection that did not happen; this is for a
+// record that should never have existed.
+router.delete("/:id", protectTriage, deletePickup);
 // Move a pickup to another date, keeping the previous one on record.
 router.patch("/:id/reschedule", protectTriage, reschedulePickup);
 // Correct recorded weights; every change is kept in wasteDataHistory.

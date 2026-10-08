@@ -1279,8 +1279,176 @@ const correctWasteData = async (req, res) => {
     }
 };
 
+/**
+ * DELETE /api/admin/pickups/:id
+ *
+ * Removes a pickup outright, together with its evidence photos in S3 and every
+ * certificate raised against it (including their PDFs).
+ *
+ * Two acknowledgements, because there are two different-sized consequences:
+ *
+ *   confirm: true   required always. A pickup and its evidence are gone for
+ *                   good; the UI also asks for the pickup ID to be typed.
+ *   force: true     required ONLY when a certificate has been issued or sent.
+ *                   Without it, such a pickup comes back as a 409 listing those
+ *                   certificates, so the UI can say exactly what is at stake
+ *                   and ask again rather than deciding on the operator's behalf.
+ *
+ * What `force` really means: an issued certificate is a document the client
+ * already holds, and this pickup is the evidence behind its figures. Deleting
+ * both leaves the client with a certificate that no longer exists on our side —
+ * nothing to answer a query with, and nothing in the GHG reporting it fed.
+ * That is sometimes exactly what is wanted (a test run, a record raised against
+ * the wrong client) which is why it is available, but it is never the default.
+ *
+ * This is not a replacement for cancelPickup. A real collection that did not
+ * happen should be cancelled, which keeps the reason and the audit trail;
+ * deleting is for records that should never have existed.
+ */
+const deletePickup = async (req, res) => {
+    if (!canTriage(req)) {
+        return res.status(403).json({ message: "Not authorized" });
+    }
+    const Pickup = require("../models/Pickup");
+    const Certificate = require("../models/Certificate");
+    const { photosOf } = require("../models/Pickup");
+    const { deleteS3Object } = require("../utils/s3");
+
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid pickup id" });
+        }
+
+        // An explicit acknowledgement, so a stray DELETE cannot remove a
+        // pickup by accident.
+        if (req.body?.confirm !== true && String(req.body?.confirm) !== "true") {
+            return res.status(400).json({
+                message: "Deleting a pickup is permanent — send confirm: true to proceed",
+            });
+        }
+
+        const pickup = await Pickup.findById(req.params.id);
+        if (!pickup) {
+            return res.status(404).json({ message: "Pickup not found" });
+        }
+
+        // Every certificate for this pickup, not just the linked one: a
+        // revision history means several rows point at it, and a superseded
+        // revision may well be the one the client actually received.
+        const certs = await Certificate.find({ pickup: pickup._id })
+            .select("certNumber status revision pdf")
+            .lean();
+        const released = certs.filter((c) => ["issued", "sent"].includes(c.status));
+        const forced = req.body?.force === true || String(req.body?.force) === "true";
+
+        if (released.length > 0 && !forced) {
+            // Not a refusal — a second question. The operator may well mean to
+            // do this, but they should see which documents go first.
+            return res.status(409).json({
+                message:
+                    "This pickup has a certificate that has already been issued to the client. Deleting it will destroy that certificate too. Send force: true to go ahead, or cancel the pickup instead to keep the record.",
+                requiresForce: true,
+                certificates: released.map((c) => ({
+                    certNumber: c.certNumber,
+                    revision: c.revision,
+                    status: c.status,
+                })),
+            });
+        }
+
+        // ---- evidence photos in S3 --------------------------------------
+        // Collected before the pickup row goes, because the keys live on it.
+        // Failures here are logged and counted rather than fatal: an object
+        // that cannot be removed should not keep a bad record in the database,
+        // and the lifecycle rule on the bucket is the backstop.
+        const objects = [];
+        for (const entry of pickup.evidence || []) {
+            for (const photo of photosOf(entry)) {
+                if (photo?.key) objects.push({ bucket: photo.bucket, key: photo.key });
+            }
+        }
+        for (const li of pickup.lineItems || []) {
+            if (li?.weighbridgePhoto?.key) {
+                objects.push({
+                    bucket: li.weighbridgePhoto.bucket,
+                    key: li.weighbridgePhoto.key,
+                });
+            }
+        }
+        // The rendered certificate PDFs, which only exist from 'issued' onward.
+        // Leaving these behind would keep a downloadable document for a
+        // certificate that no longer exists.
+        for (const c of certs) {
+            if (c?.pdf?.key) objects.push({ bucket: c.pdf.bucket, key: c.pdf.key });
+        }
+        // De-duplicate: one weighbridge photo is stamped onto every line item.
+        const unique = [...new Map(objects.map((o) => [o.key, o])).values()];
+
+        let photosDeleted = 0;
+        const photoFailures = [];
+        for (const obj of unique) {
+            try {
+                await deleteS3Object(obj);
+                photosDeleted += 1;
+            } catch (err) {
+                photoFailures.push(obj.key);
+                console.error("deletePickup: S3 delete failed", obj.key, err.message);
+            }
+        }
+
+        // ---- certificates -------------------------------------------------
+        // All of them, whatever their state. A draft was never issued so
+        // nothing outside the system refers to it; an issued or sent one is
+        // only reached here because the caller passed force, having been shown
+        // which documents it would destroy.
+        const certsDeleted = certs.length
+            ? (await Certificate.deleteMany({ pickup: pickup._id })).deletedCount
+            : 0;
+
+        const actor = actorFromReq(req);
+        const snapshot = {
+            pickupID: pickup.pickupID,
+            client: pickup.clientNameSnapshot,
+            status: pickup.status,
+            totalKg: pickup.totalKg,
+        };
+        await Pickup.deleteOne({ _id: pickup._id });
+
+        // The row is gone, so this log line is the only remaining trace of it.
+        // Released certificate numbers are named individually: if a client ever
+        // asks about one, the log is the only place left that knows it existed.
+        console.log(
+            `pickup deleted: ${snapshot.pickupID} (${snapshot.status}, ${snapshot.client}) ` +
+            `by ${actor?.userType} ${actor?.name} — ${photosDeleted}/${unique.length} objects, ` +
+            `${certsDeleted} certificate(s)` +
+            (released.length
+                ? ` INCLUDING RELEASED: ${released.map((c) => `${c.certNumber} rev${c.revision} (${c.status})`).join(", ")}`
+                : "")
+        );
+
+        return res.json({
+            ok: true,
+            deleted: snapshot,
+            forced: released.length > 0,
+            releasedCertificatesDeleted: released.map((c) => ({
+                certNumber: c.certNumber,
+                revision: c.revision,
+                status: c.status,
+            })),
+            photosDeleted,
+            photosTotal: unique.length,
+            photoFailures,
+            certificatesDeleted: certsDeleted,
+        });
+    } catch (err) {
+        console.error("deletePickup error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listPickups,
+    deletePickup,
     reschedulePickup,
     correctWasteData,
     getPickup,
