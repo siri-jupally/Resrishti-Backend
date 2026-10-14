@@ -908,6 +908,10 @@ const createPickupOnBehalf = async (req, res) => {
             // Auto-accept + self-assign to the creating Pickup Agent so it lands
             // straight in their My Pickups, ready to execute (no triage step).
             assignToActor: true,
+            // Recording a collection that already happened. The service only
+            // honours this because createdByActor is set above.
+            allowPastDate:
+                req.body.allowPastDate === true || String(req.body.allowPastDate) === "true",
         });
         return res.status(201).json(pickup);
     } catch (err) {

@@ -9,7 +9,8 @@
   actor is recorded.
 
   createPickupForClient({ client, requestedDate, requestedStreams, clientNotes,
-                          siteId, createdByActor }) → Pickup
+                          siteId, createdByActor, assignToActor,
+                          allowPastDate }) → Pickup
 
   - `client`   : a Client document (must have _id, name, billingAddress). The
                  created pickup is linked to this client and starts at
@@ -22,6 +23,13 @@
                  behalf. Omitted for the client's own requests, so that path is
                  byte-for-byte equivalent to before.
 
+  - `allowPastDate` (optional): lets a staff member date the pickup in the past,
+                 for a collection that already happened. Ignored unless
+                 `createdByActor` is present, so the client self-service path
+                 keeps its "today or later" rule no matter what is posted.
+                 Bounded by BACKDATE_LIMIT_YEARS to catch a mistyped year, and
+                 noted on the audit entry so a past date is never a mystery.
+
   Validation failures throw PickupCreationError(status, message) so each caller
   can map them to the same HTTP responses the client endpoint used.
 */
@@ -33,6 +41,11 @@ const Admin = require("../models/Admin");
 const Manager = require("../models/Manager");
 const { sendPush } = require("../utils/push");
 const { activeStreamKeys } = require("../utils/wasteCategories");
+
+// How far back a staff member may date a pickup. Generous enough for a
+// forgotten collection or a batch of historical records, tight enough to catch
+// a mistyped year.
+const BACKDATE_LIMIT_YEARS = 1;
 
 class PickupCreationError extends Error {
     constructor(status, message) {
@@ -78,6 +91,10 @@ async function createPickupForClient({
     // directly in their My Pickups ready to execute — skipping admin triage.
     // Left false for the client self-service path (starts at "requested").
     assignToActor = false,
+    // Opt-in backdating, for recording a collection that already happened.
+    // Only honoured when createdByActor is set: a client requesting their own
+    // pickup can never book it in the past, however the request is crafted.
+    allowPastDate = false,
 }) {
     if (!client || !client._id) {
         throw new PickupCreationError(400, "A valid client is required");
@@ -104,8 +121,25 @@ async function createPickupForClient({
     today.setHours(0, 0, 0, 0);
     const rdDay = new Date(rd);
     rdDay.setHours(0, 0, 0, 0);
-    if (rdDay.getTime() < today.getTime()) {
+    const isPast = rdDay.getTime() < today.getTime();
+
+    // Staff may deliberately backdate; a client never can.
+    const backdating = Boolean(allowPastDate && createdByActor);
+    if (isPast && !backdating) {
         throw new PickupCreationError(400, "requestedDate cannot be in the past");
+    }
+    if (backdating && isPast) {
+        // A floor, because the usual way to get a wildly past date is a typo in
+        // the year, and a pickup dated 2016 would quietly skew the monthly GHG
+        // report and the public impact figures for a month nobody is looking at.
+        const floor = new Date(today);
+        floor.setFullYear(floor.getFullYear() - BACKDATE_LIMIT_YEARS);
+        if (rdDay.getTime() < floor.getTime()) {
+            throw new PickupCreationError(
+                400,
+                `A backdated pickup cannot be more than ${BACKDATE_LIMIT_YEARS} year(s) old — check the year on that date`
+            );
+        }
     }
 
     // --- location (scoped to THIS client) ---------------------------------
@@ -156,9 +190,11 @@ async function createPickupForClient({
         ? [
               {
                   status: selfAssign ? "accepted" : "requested",
-                  notes: selfAssign
-                      ? `Created & self-assigned by ${createdByActor.userType} ${createdByActor.name || ""}`.trim()
-                      : `Created on behalf of client by ${createdByActor.userType} ${createdByActor.name || ""}`.trim(),
+                  notes: (
+                      selfAssign
+                          ? `Created & self-assigned by ${createdByActor.userType} ${createdByActor.name || ""}`
+                          : `Created on behalf of client by ${createdByActor.userType} ${createdByActor.name || ""}`
+                  ).trim() + (isPast ? " — backdated" : ""),
                   by: actorRef,
                   at: now,
               },
