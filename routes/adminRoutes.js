@@ -155,4 +155,8 @@ router.get('/location/trail/manager/:managerId/:date', protect, getManagerTrailB
 router.get('/notification-settings', protect, getNotificationSettings);
 router.patch('/notification-settings', protect, updateNotificationSettings);
 
+// Staff app reviews (read-only list + summary for the admin dashboard)
+const { listReviews } = require('../controllers/appReviewController');
+router.get('/reviews', protect, listReviews);
+
 module.exports = router;

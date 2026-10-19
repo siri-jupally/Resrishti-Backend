@@ -66,6 +66,10 @@ const managerSchema = new mongoose.Schema(
     // Client-Management module — job tags (not roles).
     canSupervise: { type: Boolean, default: false },
     canCoordinate: { type: Boolean, default: false },
+
+    // One-time in-app review gate. Flipped true once the user submits their
+    // mandatory review (see models/AppReview.js) so the popup never re-appears.
+    hasReviewed: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

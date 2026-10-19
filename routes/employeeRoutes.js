@@ -100,5 +100,10 @@ router.post("/location/batch", protectEmployee, employeeBatchLocations);
 
 router.post("/subscribe", protectEmployee, subscribe);
 
+// One-time mandatory app review
+const { getMyReviewStatus, submitReview } = require("../controllers/appReviewController");
+router.get("/review/status", protectEmployee, getMyReviewStatus);
+router.post("/review", protectEmployee, submitReview);
+
 module.exports = router;
 

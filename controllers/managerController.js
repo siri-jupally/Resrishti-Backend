@@ -70,6 +70,7 @@ const loginManager = async (req, res) => {
         token: generateToken(manager._id),
         isFirstLogin: manager.isFirstLogin,
         isProfileComplete: manager.isProfileComplete,
+        hasReviewed: manager.hasReviewed,
       });
     }
     res.status(400).json({ message: "Invalid credentials" });

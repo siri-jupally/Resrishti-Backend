@@ -130,4 +130,9 @@ router.get("/location/trail/:employeeId/:date", protectManager, getEmployeeTrail
 
 router.post("/subscribe", protectManager, subscribe);
 
+// One-time mandatory app review
+const { getMyReviewStatus, submitReview } = require("../controllers/appReviewController");
+router.get("/review/status", protectManager, getMyReviewStatus);
+router.post("/review", protectManager, submitReview);
+
 module.exports = router;

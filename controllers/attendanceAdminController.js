@@ -157,14 +157,27 @@ const removeHoliday = async (req, res) => {
 // GET /api/admin/attendance/reports?from=YYYY-MM-DD&to=YYYY-MM-DD
 const getReports = async (req, res) => {
     try {
-        const from = req.query.from;
-        const to = req.query.to;
-
-        if (!from || !to) {
-            return res.status(400).json({ message: "from and to date params are required" });
+        // Accept either an explicit from/to range or a month+year (the admin
+        // Reports tab sends ?month=&year=). Attendance.date is a "YYYY-MM-DD"
+        // string, so the range is built as padded ISO date strings.
+        let from = req.query.from;
+        let to = req.query.to;
+        const month = parseInt(req.query.month, 10);
+        const year = parseInt(req.query.year, 10);
+        if ((!from || !to) && month >= 1 && month <= 12 && year) {
+            const mm = String(month).padStart(2, "0");
+            const lastDay = new Date(year, month, 0).getDate(); // day 0 of next month = last day of this one
+            from = `${year}-${mm}-01`;
+            to = `${year}-${mm}-${String(lastDay).padStart(2, "0")}`;
         }
 
-        const employees = await Employee.find().select("name email manager defaultWorkMode");
+        if (!from || !to) {
+            return res.status(400).json({ message: "month+year (or from+to) are required" });
+        }
+
+        const employees = await Employee.find()
+            .select("name email manager defaultWorkMode")
+            .populate("manager", "name email");
 
         const records = await Attendance.find({
             date: { $gte: from, $lte: to },
@@ -175,6 +188,13 @@ const getReports = async (req, res) => {
         employees.forEach((emp) => {
             employeeMap[String(emp._id)] = {
                 employee: { _id: emp._id, name: emp.name, email: emp.email },
+                // Team the employee belongs to, for the admin Reports team filter.
+                manager: emp.manager
+                    ? { _id: emp.manager._id, name: emp.manager.name }
+                    : null,
+                // How many attendance records exist this period. 0 = "inactive"
+                // (never checked in / nothing recorded) for the Reports filter.
+                recordCount: 0,
                 present: 0,
                 absent: 0,
                 halfDay: 0,
@@ -195,15 +215,18 @@ const getReports = async (req, res) => {
         // (utils/attendanceCounting.js) instead of being counted inline.
         const recordsByEmployee = {};
         records.forEach((r) => {
+            if (!r.employee) return; // orphaned record (employee deleted)
             const key = String(r.employee._id || r.employee);
             (recordsByEmployee[key] = recordsByEmployee[key] || []).push(r);
         });
         Object.entries(recordsByEmployee).forEach(([key, list]) => {
             if (!employeeMap[key]) return;
             Object.assign(employeeMap[key], summariseWorked(list));
+            employeeMap[key].recordCount = list.length;
         });
 
         records.forEach((r) => {
+            if (!r.employee) return; // orphaned record (employee deleted)
             const key = String(r.employee._id || r.employee);
             if (!employeeMap[key]) return;
 
@@ -229,20 +252,62 @@ const getReports = async (req, res) => {
 
         const report = Object.values(employeeMap);
 
-        // Org-level summary
+        // Working days in the range = weekdays (Mon–Fri), not counting days in
+        // the future (so the current, partial month isn't penalised).
+        const startD = new Date(`${from}T00:00:00`);
+        let endD = new Date(`${to}T00:00:00`);
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        if (endD > today) endD = today;
+        let totalWorkingDays = 0;
+        for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+            const dow = d.getDay();
+            if (dow !== 0 && dow !== 6) totalWorkingDays++;
+        }
+
+        // Average attendance = worked days (half-days count half) over the
+        // working days everyone could have attended, as a 0–100%.
+        const totalPresentDays = report.reduce(
+            (a, e) => a + e.present + 0.5 * e.halfDay,
+            0
+        );
+        const denom = employees.length * totalWorkingDays;
+        const avgAttendance = denom > 0
+            ? Math.min(100, Math.round((totalPresentDays / denom) * 100))
+            : 0;
+
+        const totalLateCheckins = records.filter((r) => r.isLateCheckIn).length;
+
+        // Shape consumed by the admin Reports tab (AdminAttendanceTab.jsx).
+        const summary = {
+            totalEmployees: employees.length,
+            avgAttendance,
+            totalWorkingDays,
+            totalLateCheckins,
+        };
+
+        // Legacy org-level summary kept alongside in case anything else reads it.
         const orgSummary = {
             totalEmployees: employees.length,
             totalRecords: records.length,
-            // Counted days only; pending out-of-premises days are reported apart.
             totalPresent: summariseWorked(records).present,
             totalPendingApproval: summariseWorked(records).pendingApproval,
             totalAbsent: records.filter((r) => r.status === "absent").length,
             totalLeave: records.filter((r) => r.status === "leave").length,
             totalWfh: records.filter((r) => r.workMode === "WFH").length,
-            totalLate: records.filter((r) => r.isLateCheckIn).length,
+            totalLate: totalLateCheckins,
         };
 
-        res.json({ from, to, orgSummary, employeeReports: report });
+        res.json({
+            from,
+            to,
+            month: month || null,
+            year: year || null,
+            summary,
+            employees: report,
+            orgSummary,
+            employeeReports: report,
+        });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }

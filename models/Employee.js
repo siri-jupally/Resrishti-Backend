@@ -83,6 +83,10 @@ const employeeSchema = new mongoose.Schema(
     // canCoordinate: can triage incoming client pickup requests (typically Admin/Manager only).
     canSupervise: { type: Boolean, default: false },
     canCoordinate: { type: Boolean, default: false },
+
+    // One-time in-app review gate. Flipped true once the user submits their
+    // mandatory review (see models/AppReview.js) so the popup never re-appears.
+    hasReviewed: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
