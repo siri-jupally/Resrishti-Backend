@@ -13,7 +13,15 @@
     GET    /:type/:id        one person's profile and rate history
     PUT    /:type/:id        create or update a profile (admin only)
     POST   /:type/:id/rates  add a rate effective from a date (admin only)
-    PATCH  /:type/:id/bank   bank details, which the office fills in later
+    POST   /remind-bank      nudge everybody with no salary account on file
+
+  Bank details are not set here. The employee owns their salary account and
+  fills it in on their own profile (Employee.bank / Manager.bank, written by
+  controllers/profileController.js), which is also what the bank file and the
+  payment screen read. This used to let an accountant type them into
+  PayrollProfile.bank, which nothing read — so the details were collected
+  twice and paid from neither reliably. Payroll now reads the person's own
+  account and, when it is missing, asks them for it.
 */
 const mongoose = require("mongoose");
 
@@ -22,12 +30,20 @@ const PaidDayPolicy = require("../models/PaidDayPolicy");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
 const { defaultPolicyFor, seedPaidDayPolicies } = require("../utils/payrollDefaults");
+const { notifyIfEnabled } = require("../utils/push");
+const { sendEmail } = require("../utils/emailService");
 
 const TYPES = ["Employee", "Manager"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const actorName = (req) =>
-    req.admin?.name || req.admin?.email || req.accountant?.name || req.accountant?.email || "";
+    req.admin?.name ||
+    req.admin?.email ||
+    req.payrollEmployee?.name ||
+    req.payrollEmployee?.email ||
+    req.payrollManager?.name ||
+    req.payrollManager?.email ||
+    "";
 
 const normaliseType = (raw) => {
     const value = String(raw || "").toLowerCase();
@@ -48,8 +64,8 @@ const listProfiles = async (req, res) => {
         await seedPaidDayPolicies();
 
         const [employees, managers, profiles] = await Promise.all([
-            Employee.find({}).select("name email jobRole department joiningDate manager").lean(),
-            Manager.find({}).select("name email jobRole department joiningDate").lean(),
+            Employee.find({}).select("name email jobRole department joiningDate manager bank bankUpdatedAt").lean(),
+            Manager.find({}).select("name email jobRole department joiningDate bank bankUpdatedAt").lean(),
             PayrollProfile.find({}).populate("paidDayPolicy", "name payWeeklyOff payHoliday").lean(),
         ]);
 
@@ -83,7 +99,9 @@ const listProfiles = async (req, res) => {
                 rateEffectiveFrom: latestRate?.effectiveFrom ?? null,
                 paidDayPolicy: profile?.paidDayPolicy || null,
                 overtimeEligible: profile?.overtimeEligible === true,
-                hasBankDetails: Boolean(profile?.bank?.accountNumber),
+                // Their own account, the one the bank file is built from.
+                hasBankDetails: Boolean(person.bank?.accountNumber),
+                bankUpdatedAt: person.bankUpdatedAt || null,
                 isActive: profile ? profile.isActive !== false : null,
             };
         });
@@ -129,8 +147,8 @@ const summary = async (req, res) => {
     try {
         const [profiles, employees, managers] = await Promise.all([
             PayrollProfile.find({}).lean(),
-            Employee.countDocuments({}),
-            Manager.countDocuments({}),
+            Employee.find({}).select("bank").lean(),
+            Manager.find({}).select("bank").lean(),
         ]);
 
         const tally = (key) =>
@@ -140,15 +158,32 @@ const summary = async (req, res) => {
                 return acc;
             }, {});
 
-        const people = employees + managers;
+        const people = employees.length + managers.length;
+
+        /*
+          Counted against the person's own record, not the payroll profile:
+          the account they typed in is the one that gets paid. Reported only
+          for people who are actually on payroll, because an untagged person
+          with no account is not yet a problem.
+        */
+        const bankByPerson = new Map([
+            ...employees.map((e) => [`Employee:${String(e._id)}`, e.bank]),
+            ...managers.map((m) => [`Manager:${String(m._id)}`, m.bank]),
+        ]);
+        const onPayroll = profiles.filter((p) => p.isActive !== false);
+        const withBank = onPayroll.filter(
+            (p) => bankByPerson.get(`${p.personType}:${String(p.personId)}`)?.accountNumber
+        ).length;
+
         return res.json({
             people,
             tagged: profiles.length,
             untagged: people - profiles.length,
             byEmploymentType: tally("employmentType"),
             byPayModel: tally("payModel"),
-            active: profiles.filter((p) => p.isActive !== false).length,
-            withBankDetails: profiles.filter((p) => p.bank?.accountNumber).length,
+            active: onPayroll.length,
+            withBankDetails: withBank,
+            missingBankDetails: onPayroll.length - withBank,
             overtimeEligible: profiles.filter((p) => p.overtimeEligible === true).length,
         });
     } catch (err) {
@@ -169,7 +204,7 @@ const loadPerson = async (req, res) => {
     }
     const person = await modelFor(personType)
         .findById(req.params.id)
-        .select("name email jobRole department joiningDate")
+        .select("name email jobRole department joiningDate bank bankUpdatedAt bankHistory")
         .lean();
     if (!person) {
         res.status(404).json({ message: `${personType} not found` });
@@ -193,6 +228,15 @@ const getProfile = async (req, res) => {
             personType,
             person,
             profile: profile || null,
+            /*
+              Their own salary account. Read-only to payroll: it is theirs to
+              change, on their own profile, and every change there is emailed
+              to them and kept in bankHistory. `bankUpdatedAt` is what a run
+              uses to flag an account that moved after it was generated.
+            */
+            bank: person.bank?.accountNumber ? person.bank : null,
+            bankUpdatedAt: person.bankUpdatedAt || null,
+            bankChanges: person.bankHistory?.length || 0,
             // Newest first — the rate in force is what a reader looks for.
             rates: profile
                 ? [...profile.rates].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))
@@ -370,43 +414,85 @@ const addRate = async (req, res) => {
     }
 };
 
-// PATCH /api/payroll/profiles/:type/:id/bank
-//
-// Kept apart from the rest of the profile: bank details are filled in later,
-// by whoever collects them, and changing them should not require touching
-// somebody's pay.
-const updateBank = async (req, res) => {
+/*
+  POST /api/payroll/profiles/remind-bank
+
+  Nobody can be paid without an account, and the first anybody usually hears
+  about a missing one is on payday. The employee's own dashboard already nags
+  them every day it is missing (components/profile/BankDetailsNotice.jsx), but
+  that only works for somebody who opens the app, so this is the push from the
+  other side: whoever is preparing payroll can ask everybody still missing an
+  account, in one action, and see who was asked.
+
+  Only people on payroll are asked - an untagged person is not being paid yet.
+  Notifications are best-effort: a failed push or email must not fail the call,
+  because the useful part is the list it comes back with.
+*/
+const remindMissingBank = async (req, res) => {
     try {
-        const found = await loadPerson(req, res);
-        if (!found) return undefined;
-        const { personType, person } = found;
+        const [profiles, employees, managers] = await Promise.all([
+            PayrollProfile.find({ isActive: { $ne: false } })
+                .select("personType personId")
+                .lean(),
+            Employee.find({}).select("name email bank pushSubscription").lean(),
+            Manager.find({}).select("name email bank pushSubscription").lean(),
+        ]);
 
-        const profile = await PayrollProfile.findOne({ personType, personId: person._id });
-        if (!profile) {
-            return res.status(404).json({ message: "This person has no payroll profile yet" });
-        }
+        const byKey = new Map([
+            ...employees.map((e) => [`Employee:${String(e._id)}`, e]),
+            ...managers.map((m) => [`Manager:${String(m._id)}`, m]),
+        ]);
 
-        const bank = req.body?.bank || req.body || {};
-        const ifsc = String(bank.ifsc || "").trim().toUpperCase();
-        if (ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
-            return res.status(400).json({
-                message: "That IFSC does not look right — it is 4 letters, a zero, then 6 characters.",
+        const missing = profiles
+            .map((p) => ({
+                personType: p.personType,
+                person: byKey.get(`${p.personType}:${String(p.personId)}`),
+            }))
+            .filter((row) => row.person && !row.person.bank?.accountNumber);
+
+        const asked = [];
+        for (const { personType, person } of missing) {
+            asked.push({
+                personType,
+                personId: String(person._id),
+                name: person.name || person.email,
+                email: person.email,
+                notified: Boolean(person.pushSubscription),
             });
+
+            if (person.pushSubscription) {
+                try {
+                    await notifyIfEnabled("attendance", person.pushSubscription, {
+                        title: "Add your salary account",
+                        body: "Your salary cannot be paid until your bank details are on your profile. It takes a minute.",
+                        url: "/",
+                    });
+                } catch (err) {
+                    console.error("bank reminder push failed:", err.message);
+                }
+            }
+
+            try {
+                await sendEmail({
+                    to: person.email,
+                    subject: "We need your bank details to pay your salary",
+                    html: `<p>Hello ${person.name || ""},</p>
+                           <p>We do not have a bank account on file for you, and your salary
+                           cannot be paid without one. Please open your ReSrishti profile and
+                           add your account holder name, account number, IFSC and bank.</p>
+                           <p>It takes a minute, and you can change it later if you need to.</p>`,
+                });
+            } catch (err) {
+                console.error("bank reminder email failed:", err.message);
+            }
         }
 
-        profile.bank = {
-            accountHolderName: String(bank.accountHolderName || "").trim(),
-            accountNumber: String(bank.accountNumber || "").trim(),
-            ifsc,
-            bankName: String(bank.bankName || "").trim(),
-            branch: String(bank.branch || "").trim(),
-        };
-        profile.updatedByName = actorName(req);
-        await profile.save();
-
-        return res.json({ bank: profile.bank });
+        return res.json({
+            asked: asked.length,
+            people: asked.sort((a, b) => String(a.name).localeCompare(String(b.name))),
+        });
     } catch (err) {
-        console.error("updateBank error:", err.message);
+        console.error("remindMissingBank error:", err.message);
         return res.status(500).json({ message: err.message });
     }
 };
@@ -417,5 +503,5 @@ module.exports = {
     getProfile,
     upsertProfile,
     addRate,
-    updateBank,
+    remindMissingBank,
 };

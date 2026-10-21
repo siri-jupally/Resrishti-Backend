@@ -39,6 +39,17 @@ const historySchema = new mongoose.Schema(
     { _id: false }
 );
 
+const reviewSchema = new mongoose.Schema(
+    {
+        confirmedAt: Date,
+        by: actorSchema,
+        note: String,
+        // What was on screen when they confirmed, so a later change is visible.
+        daysConfirmed: Number,
+    },
+    { _id: false }
+);
+
 const attendanceMonthLockSchema = new mongoose.Schema(
     {
         // "YYYY-MM". The month is the unit of payroll, so it is the unit here.
@@ -70,6 +81,26 @@ const attendanceMonthLockSchema = new mongoose.Schema(
             attendanceRecords: Number,
             workedHours: Number,
             takenAt: Date,
+            _id: false,
+        },
+
+        /*
+          What an admin has looked at and signed off before closing.
+
+          Pending approvals block a close on their own, because an undecided
+          day is simply wrong. Extra-pay days and leave days are different:
+          they are already decided and correct, but they are the two places
+          where attendance quietly turns into money — a Sunday worked becomes
+          overtime, and a leave type decides whether a day is paid. Nobody was
+          ever asked to agree to those figures, so the review asks, and the
+          answer is kept here with who gave it.
+
+          Only required when the month actually has such days; a month with no
+          overtime and no leave has nothing to confirm.
+        */
+        reviews: {
+            extraPay: reviewSchema,
+            leave: reviewSchema,
             _id: false,
         },
 

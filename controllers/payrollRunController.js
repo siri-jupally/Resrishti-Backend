@@ -42,19 +42,7 @@ const { computeLine, round2 } = require("../utils/payrollEngine");
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
-const actorFromReq = (req) => {
-    if (req.admin) {
-        return { userType: "Admin", userId: req.admin._id, name: req.admin.name || req.admin.email };
-    }
-    if (req.accountant) {
-        return {
-            userType: "Accountant",
-            userId: req.accountant._id,
-            name: req.accountant.name || req.accountant.email,
-        };
-    }
-    return { userType: "System", name: "system" };
-};
+const { actorFromReq } = require("../utils/payrollActor");
 
 const audit = async ({ action, run, line, month, req, detail, reason }) => {
     try {
@@ -130,9 +118,13 @@ const calculateRun = async (req, res) => {
         }
 
         const existing = await PayrollRun.findOne({ month });
-        if (existing && ["approved", "locked"].includes(existing.status)) {
+        // Only a draft may be recalculated. Once it is with an approver — or
+        // approved, paid or closed — the figures are something somebody has
+        // acted on, so recalculating has to start by sending it back.
+        if (existing && existing.status !== "draft") {
             return res.status(409).json({
-                message: `${month} has already been ${existing.status}. Reopen it first if it genuinely needs recalculating.`,
+                message: `${month} is ${existing.status}. Send it back to draft before recalculating.`,
+                runStatus: existing.status,
             });
         }
 
@@ -153,10 +145,10 @@ const calculateRun = async (req, res) => {
             Employee.find({}).select("name email department jobRole").lean(),
             Manager.find({}).select("name email department jobRole").lean(),
             Attendance.find({ date: { $gte: start, $lte: end } })
-                .select("employee date status workingHours approvalStatus locationWithinBoundary")
+                .select("employee date status workingHours approvalStatus locationWithinBoundary extraPayExcluded")
                 .lean(),
             ManagerAttendance.find({ date: { $gte: start, $lte: end } })
-                .select("manager date status workingHours approvalStatus locationWithinBoundary")
+                .select("manager date status workingHours approvalStatus locationWithinBoundary extraPayExcluded")
                 .lean(),
         ]);
 
@@ -251,8 +243,17 @@ const calculateRun = async (req, res) => {
         const run =
             existing ||
             new PayrollRun({ month });
-        run.status = "review";
+        // Draft. Generating is not submitting: the preparer reviews and fixes
+        // first, which is also what makes "correct and recalculate without
+        // starting over" possible.
+        run.status = "draft";
         run.calculatedAt = now;
+        // A fresh calculation supersedes any earlier rejection.
+        run.rejectedAt = undefined;
+        run.rejectedBy = undefined;
+        run.rejectionReason = undefined;
+        run.submittedAt = undefined;
+        run.submittedBy = undefined;
         run.calculatedBy = actor;
         run.settingsSnapshot = {
             perDayRateBasis: settings.perDayRateBasis,
@@ -358,10 +359,21 @@ const getRun = async (req, res) => {
         const lines = await PayrollLine.find({ run: run._id })
             .sort({ personName: 1 })
             .lean();
+        // Validation travels with the run so the dashboard can show one next
+        // action and the reasons it is or is not available, without a second
+        // round trip per screen.
+        const settings = await getSettings();
+        const [blockers, warnings] = await Promise.all([
+            blockersFor(run),
+            warningsFor(run, settings),
+        ]);
         return res.json({
             month,
             run,
             attendanceLocked: await isMonthLocked(month),
+            blockers,
+            warnings,
+            canSubmit: run.status === "draft" && blockers.length === 0,
             lines,
             flagged: lines.filter(
                 (l) =>
@@ -376,27 +388,181 @@ const getRun = async (req, res) => {
     }
 };
 
-// POST /api/payroll/runs/:month/approve
+/*
+  Which of these lines belong to somebody with no salary account on file.
+
+  Reads the Employee/Manager record, not the payroll profile: the bank account
+  is the person's own (see models/Employee.js), and payroll is only a consumer
+  of it. One query per collection rather than per line.
+*/
+const peopleWithoutBank = async (lines) => {
+    const byType = { Employee: [], Manager: [] };
+    for (const l of lines) {
+        if (byType[l.personType]) byType[l.personType].push(l.personId);
+    }
+    const [employees, managers] = await Promise.all([
+        byType.Employee.length
+            ? Employee.find({ _id: { $in: byType.Employee } }).select("name bank").lean()
+            : [],
+        byType.Manager.length
+            ? Manager.find({ _id: { $in: byType.Manager } }).select("name bank").lean()
+            : [],
+    ]);
+    const hasBank = new Map(
+        [...employees, ...managers].map((p) => [String(p._id), Boolean(p.bank?.accountNumber)])
+    );
+    return lines
+        .filter((l) => !hasBank.get(String(l.personId)))
+        .map((l) => ({ personType: l.personType, personId: l.personId, name: l.personName }));
+};
+
+/*
+  What stops a run being submitted, and what merely deserves a look.
+
+  The distinction is the whole point of §4's "errors are warnings or blockers,
+  not statuses": a month with three people excluded is a month somebody should
+  glance at, not a month in a special state. Only things that would make the
+  payroll wrong are blockers.
+
+  Blockers  — a run with no lines at all, and any line that would pay a
+              negative amount. Neither can be approved into something sensible.
+  Warnings  — people the engine held out (no profile, no attendance), pay that
+              moved sharply against last month, and anyone with no bank account
+              on file. All of those can be approved; the last one simply cannot
+              be paid until it is fixed, which the disbursement step says again.
+*/
+const blockersFor = async (run) => {
+    const lines = await PayrollLine.find({ run: run._id })
+        .select("personName net")
+        .lean();
+    const out = [];
+
+    if (lines.length === 0) {
+        out.push({
+            code: "noLines",
+            message: "Nothing was calculated for this month — there is nobody to pay.",
+        });
+    }
+
+    const negative = lines.filter((l) => Number(l.net) < 0);
+    if (negative.length > 0) {
+        out.push({
+            code: "negativeNet",
+            message: `${negative.length} ${negative.length === 1 ? "person has" : "people have"} a negative net. Adjust the deductions before submitting.`,
+            people: negative.map((l) => ({ name: l.personName, net: l.net })),
+        });
+    }
+
+    return out;
+};
+
+/**
+ * Non-blocking things worth seeing before approving. Separate from blockersFor
+ * so the dashboard can show both without either deciding the other.
+ */
+const warningsFor = async (run, settings) => {
+    const lines = await PayrollLine.find({ run: run._id })
+        .select("personName personType personId net variancePercent")
+        .lean();
+    const out = [];
+
+    if ((run.exceptions || []).length > 0) {
+        out.push({
+            code: "excluded",
+            message: `${run.exceptions.length} ${run.exceptions.length === 1 ? "person was" : "people were"} left out of this run.`,
+            people: run.exceptions.map((e) => ({ name: e.name, reason: e.message })),
+        });
+    }
+
+    const threshold = settings?.variancePercentThreshold ?? 20;
+    const swung = lines.filter(
+        (l) => Number.isFinite(l.variancePercent) && Math.abs(l.variancePercent) >= threshold
+    );
+    if (swung.length > 0) {
+        out.push({
+            code: "variance",
+            message: `${swung.length} ${swung.length === 1 ? "person's" : "people's"} pay moved by ${threshold}% or more against last month.`,
+            people: swung.map((l) => ({ name: l.personName, variancePercent: l.variancePercent })),
+        });
+    }
+
+    const noBank = await peopleWithoutBank(lines);
+    if (noBank.length > 0) {
+        out.push({
+            code: "noBankDetails",
+            // They enter it themselves, on their own profile - payroll cannot
+            // fill it in for them. Payroll Setup carries a one-press reminder.
+            message: `${noBank.length} ${noBank.length === 1 ? "person has" : "people have"} not added a salary account to their profile, so they cannot be paid yet. Ask them from Payroll Setup.`,
+            people: noBank.map((n) => ({ name: n.name })),
+        });
+    }
+
+    return out;
+};
+
+// POST /api/payroll/runs/:month/submit   { notes? }
+//
+// Draft → pending-approval. Blocking problems are refused here rather than at
+// approval, so the preparer is the one who sees them.
+const submitRun = async (req, res) => {
+    try {
+        const { month } = req.params;
+        const run = await PayrollRun.findOne({ month });
+        if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
+        if (!PayrollRun.canTransition(run.status, "pending-approval")) {
+            return res.status(409).json({
+                message: `This run is ${run.status}, so there is nothing to submit.`,
+                runStatus: run.status,
+            });
+        }
+
+        const blockers = await blockersFor(run);
+        if (blockers.length > 0) {
+            return res.status(409).json({
+                message: "Resolve these before submitting for approval.",
+                blockers,
+            });
+        }
+
+        const actor = actorFromReq(req);
+        run.status = "pending-approval";
+        run.submittedAt = new Date();
+        run.submittedBy = actor;
+        if (req.body?.notes) run.notes = String(req.body.notes).trim();
+        await run.save();
+
+        await audit({ action: "run.submitted", run, month, req, detail: { net: run.totals.net } });
+        return res.json(run);
+    } catch (err) {
+        console.error("submitRun error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// POST /api/payroll/runs/:month/approve   { notes? }
 const approveRun = async (req, res) => {
     try {
         const { month } = req.params;
         const run = await PayrollRun.findOne({ month });
         if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
-        if (run.status !== "review") {
+        if (!PayrollRun.canTransition(run.status, "approved")) {
             return res.status(409).json({
                 message: `This run is ${run.status}, so there is nothing to approve.`,
+                runStatus: run.status,
             });
         }
 
         const settings = await getSettings();
         // Under maker–checker the person approving must not be the person who
         // prepared it. Approving your own work is not a second pair of eyes.
-        if (settings.approvalDepth === "makerChecker" && run.calculatedBy?.userId) {
+        if (settings.approvalDepth === "makerChecker") {
             const actor = actorFromReq(req);
-            if (String(run.calculatedBy.userId) === String(actor.userId)) {
+            const preparer = run.submittedBy?.userId || run.calculatedBy?.userId;
+            if (preparer && String(preparer) === String(actor.userId)) {
                 return res.status(403).json({
                     message:
-                        "You calculated this run, so somebody else has to approve it. That is what maker–checker is for.",
+                        "You prepared this run, so somebody else has to approve it. That is what maker–checker is for.",
+                    sameActor: true,
                 });
             }
         }
@@ -415,31 +581,78 @@ const approveRun = async (req, res) => {
     }
 };
 
-// POST /api/payroll/runs/:month/lock
-const lockRun = async (req, res) => {
+// POST /api/payroll/runs/:month/reject   { reason }
+//
+// Pending-approval → draft. The reason is required: a run comes back for a
+// stated purpose, and whoever picks it up needs to know what it was.
+const rejectRun = async (req, res) => {
+    try {
+        const { month } = req.params;
+        const reason = String(req.body?.reason || "").trim();
+        if (reason.length < 5) {
+            return res.status(400).json({
+                message: "Say what needs correcting — a rejection without a reason just loses a day.",
+            });
+        }
+        const run = await PayrollRun.findOne({ month });
+        if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
+        if (!PayrollRun.canTransition(run.status, "draft")) {
+            return res.status(409).json({
+                message: `This run is ${run.status}, so there is nothing to reject.`,
+                runStatus: run.status,
+            });
+        }
+
+        run.status = "draft";
+        run.rejectedAt = new Date();
+        run.rejectedBy = actorFromReq(req);
+        run.rejectionReason = reason;
+        await run.save();
+
+        await audit({ action: "run.rejected", run, month, req, reason });
+        return res.json(run);
+    } catch (err) {
+        console.error("rejectRun error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// POST /api/payroll/runs/:month/close
+//
+// Paid → closed. The end of the cycle: nothing further happens to this month
+// unless an admin reopens it with a reason.
+const closeRun = async (req, res) => {
     try {
         const { month } = req.params;
         const run = await PayrollRun.findOne({ month });
         if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
-        if (run.status !== "approved") {
+        if (!PayrollRun.canTransition(run.status, "closed")) {
             return res.status(409).json({
-                message: "Only an approved run can be locked.",
+                message:
+                    run.status === "approved"
+                        ? "Record the payments first — a month is closed once people have been paid."
+                        : `This run is ${run.status}, so it cannot be closed.`,
+                runStatus: run.status,
             });
         }
-        run.status = "locked";
-        run.lockedAt = new Date();
-        run.lockedBy = actorFromReq(req);
+        run.status = "closed";
+        run.closedAt = new Date();
+        run.closedBy = actorFromReq(req);
         await run.save();
 
-        await audit({ action: "run.locked", run, month, req, detail: { net: run.totals.net } });
+        await audit({ action: "run.closed", run, month, req, detail: { net: run.totals.net } });
         return res.json(run);
     } catch (err) {
-        console.error("lockRun error:", err.message);
+        console.error("closeRun error:", err.message);
         return res.status(500).json({ message: err.message });
     }
 };
 
 // POST /api/payroll/runs/:month/reopen   { reason }
+//
+// The authorised way back into a month that was approved, paid or closed.
+// Deliberately not a transition in ALLOWED_TRANSITIONS: it is an override, and
+// it keeps its own reason and timestamps so it reads as one in the audit.
 const reopenRun = async (req, res) => {
     try {
         const { month } = req.params;
@@ -449,11 +662,11 @@ const reopenRun = async (req, res) => {
         }
         const run = await PayrollRun.findOne({ month });
         if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
-        if (!["approved", "locked"].includes(run.status)) {
+        if (!["approved", "paid", "closed"].includes(run.status)) {
             return res.status(409).json({ message: "This run is already open." });
         }
 
-        run.status = "review";
+        run.status = "draft";
         run.reopenedAt = new Date();
         run.reopenedBy = actorFromReq(req);
         run.reopenReason = reason;
@@ -479,7 +692,7 @@ const adjustLine = async (req, res) => {
         }
         const run = await PayrollRun.findOne({ month });
         if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
-        if (run.status !== "review") {
+        if (run.status !== "draft") {
             return res.status(409).json({
                 message: `A ${run.status} run cannot be adjusted. Reopen it first.`,
             });
@@ -509,6 +722,32 @@ const adjustLine = async (req, res) => {
 
         const line = await PayrollLine.findOne({ _id: lineId, run: run._id });
         if (!line) return res.status(404).json({ message: "Line not found in this run" });
+
+        /*
+          Nobody adjusts their own pay.
+
+          This could not happen while the accountant was a login of its own:
+          they were not an employee, so they had no line in the run. Now that
+          an accountant is an assigned employee, they do — and a bonus to
+          yourself with no second pair of eyes before approval is exactly the
+          thing maker-checker exists to prevent. An admin can still adjust it;
+          the accountant has to ask.
+        */
+        const self = req.payrollEmployee
+            ? { personType: "Employee", personId: req.payrollEmployee._id }
+            : req.payrollManager
+                ? { personType: "Manager", personId: req.payrollManager._id }
+                : null;
+        if (
+            self &&
+            line.personType === self.personType &&
+            String(line.personId) === String(self.personId)
+        ) {
+            return res.status(403).json({
+                message:
+                    "You cannot adjust your own pay. Ask an admin to make this adjustment.",
+            });
+        }
 
         line.adjustmentEntries.push({
             category, amount, reason, byName: actorFromReq(req).name,
@@ -554,11 +793,16 @@ module.exports = {
     calculateRun,
     listRuns,
     getRun,
+    submitRun,
     approveRun,
-    lockRun,
+    rejectRun,
+    closeRun,
     reopenRun,
     adjustLine,
     getRunAudit,
     // Exported for tests.
     buildLeaveMap,
+    blockersFor,
+    warningsFor,
+    peopleWithoutBank,
 };

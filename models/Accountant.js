@@ -1,14 +1,19 @@
 /*
-  Accountant — the payroll preparer.
+  Accountant — DEPRECATED. The payroll preparer, when that was a login.
 
-  A login of its own rather than a flag on Admin, so the separation of duties
-  is structural: the accountant prepares and calculates a payroll run, the
-  admin approves and locks it. Neither can do the other's half, which is the
-  whole point of maker–checker on the most sensitive numbers in the system.
+  An accountant is now an employee an admin has assigned: `canPreparePayroll`
+  on Employee, reached with their ordinary employee credentials. One set of
+  credentials per person, and one account to revoke when they move on.
 
-  Mirrors Admin deliberately — same password handling, same passwordChangedAt
-  session invalidation — so there is one way passwords work in this codebase
-  rather than four.
+  Nothing authenticates against this model any more and nothing creates a row
+  in it. It is kept only so the existing rows can still be read — by
+  scripts/migrate-accountants-to-employees.js, which assigns the tag to the
+  matching employees, and by anyone looking up a name that appears on an old
+  run. Delete it, and the collection, once every environment has migrated.
+
+  Maker–checker did not live in the separate login and is unaffected:
+  approving is still admin-only, and approveRun still refuses an approver who
+  prepared the run.
 */
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");

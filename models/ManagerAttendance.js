@@ -84,6 +84,20 @@ const managerAttendanceSchema = new mongoose.Schema(
         isEarlyCheckOut: { type: Boolean, default: false },
         // True when this check-in happened on a weekly-off day (voluntary/overtime work).
         isWeekendWork: { type: Boolean, default: false },
+
+        /*
+          Extra pay for this day, decided by an admin in the month review.
+
+          A day worked on a weekly-off or a holiday becomes overtime, which is
+          pay created out of attendance with nobody having approved the money.
+          The month review lists these days and lets an admin take one out:
+          the day stays recorded exactly as it was, it just stops counting
+          toward extra pay. See controllers/attendanceLockSettlements.js.
+        */
+        extraPayExcluded: { type: Boolean, default: false },
+        extraPayNote: { type: String, trim: true },
+        extraPayDecidedByName: { type: String, trim: true },
+        extraPayDecidedAt: { type: Date },
         locationWithinBoundary: { type: Boolean },
     },
     { timestamps: true }

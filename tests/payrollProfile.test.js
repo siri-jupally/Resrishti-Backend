@@ -21,7 +21,6 @@ jest.mock("../socketHandler", () => ({ getIo: () => ({ to: () => ({ emit: () => 
 const PayrollProfile = require("../models/PayrollProfile");
 const PaidDayPolicy = require("../models/PaidDayPolicy");
 const PayrollSettings = require("../models/PayrollSettings");
-const Accountant = require("../models/Accountant");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
 const Admin = require("../models/Admin");
@@ -61,7 +60,7 @@ let employee;
 beforeEach(async () => {
     await Promise.all([
         PayrollProfile.deleteMany({}), PaidDayPolicy.deleteMany({}),
-        PayrollSettings.deleteMany({}), Accountant.deleteMany({}),
+        PayrollSettings.deleteMany({}),
         Employee.deleteMany({}), Manager.deleteMany({}), Admin.deleteMany({}),
     ]);
     admin = await Admin.create({ email: "a@test.com", password: "secret123" });
@@ -460,38 +459,97 @@ describe("the workforce list", () => {
 
 // ──────────────────────────── bank details ────────────────────────────────
 
+/*
+  Bank details are the employee's, not payroll's. Payroll used to have its own
+  copy on the PayrollProfile that an accountant typed into, and nothing read
+  it: the bank file and the payment screen both read Employee.bank /
+  Manager.bank, which the person fills in on their own profile. So two
+  accounts were collected and neither reliably paid from. Payroll now reads
+  the person's own account and can ask whoever has not entered one.
+*/
 describe("bank details", () => {
     beforeEach(async () => { await tag(monthlyBody()); });
 
-    const setBank = async (bank) => {
-        const res = mockRes();
-        await profiles.updateBank(
-            asAdmin({ params: { type: "employee", id: String(employee._id) }, body: { bank } }),
-            res
+    test("payroll no longer offers a way to set them", () => {
+        expect(profiles.updateBank).toBeUndefined();
+    });
+
+    test("the list reads the person's own account, not a payroll copy", async () => {
+        // A copy on the payroll profile must not make somebody look payable.
+        await PayrollProfile.updateOne(
+            { personId: employee._id },
+            { $set: { bank: { accountNumber: "99999999", ifsc: "HDFC0001234" } } }
         );
-        return res;
-    };
 
-    test("can be filled in later, separately from pay", async () => {
-        const res = await setBank({
-            accountHolderName: "Emp", accountNumber: "12345678901",
-            ifsc: "hdfc0001234", bankName: "HDFC",
-        });
-        expect(res.statusCode).toBe(200);
-        expect(res.body.bank.ifsc).toBe("HDFC0001234");
-    });
-
-    test("a malformed IFSC is refused rather than stored", async () => {
-        const res = await setBank({ accountNumber: "123", ifsc: "NOTANIFSC" });
-        expect(res.statusCode).toBe(400);
-        const profile = await PayrollProfile.findOne({ personId: employee._id });
-        expect(profile.bank?.accountNumber).toBeFalsy();
-    });
-
-    test("the list shows who still has none", async () => {
-        const res = mockRes();
+        let res = mockRes();
         await profiles.listProfiles(asAdmin({ query: { status: "tagged" } }), res);
         expect(res.body.items[0].hasBankDetails).toBe(false);
+
+        // Entered by the employee on their own profile, it counts.
+        await Employee.updateOne(
+            { _id: employee._id },
+            { $set: {
+                bank: { accountHolderName: "Emp", accountNumber: "12345678901", ifsc: "HDFC0001234" },
+                bankUpdatedAt: new Date(),
+            } }
+        );
+
+        res = mockRes();
+        await profiles.listProfiles(asAdmin({ query: { status: "tagged" } }), res);
+        expect(res.body.items[0].hasBankDetails).toBe(true);
+        expect(res.body.items[0].bankUpdatedAt).toBeTruthy();
+    });
+
+    test("one person's screen shows their account read-only", async () => {
+        await Employee.updateOne(
+            { _id: employee._id },
+            { $set: { bank: { accountNumber: "12345678901", ifsc: "HDFC0001234" } } }
+        );
+        const res = mockRes();
+        await profiles.getProfile(
+            asAdmin({ params: { type: "employee", id: String(employee._id) } }), res
+        );
+        expect(res.body.bank.accountNumber).toBe("12345678901");
+        expect(res.body.bankChanges).toBe(0);
+    });
+
+    test("somebody with no account comes back as null rather than an empty shell", async () => {
+        const res = mockRes();
+        await profiles.getProfile(
+            asAdmin({ params: { type: "employee", id: String(employee._id) } }), res
+        );
+        expect(res.body.bank).toBeNull();
+    });
+
+    test("the summary counts accounts against people on payroll", async () => {
+        const res = mockRes();
+        await profiles.summary(asAdmin(), res);
+        expect(res.body.withBankDetails).toBe(0);
+        expect(res.body.missingBankDetails).toBe(1);
+    });
+
+    test("the reminder asks everybody on payroll who has no account", async () => {
+        const res = mockRes();
+        await profiles.remindMissingBank(asAdmin({ body: {} }), res);
+        expect(res.body.asked).toBe(1);
+        expect(res.body.people[0].email).toBe(employee.email);
+    });
+
+    test("the reminder leaves alone anybody who has entered one", async () => {
+        await Employee.updateOne(
+            { _id: employee._id },
+            { $set: { bank: { accountNumber: "12345678901" } } }
+        );
+        const res = mockRes();
+        await profiles.remindMissingBank(asAdmin({ body: {} }), res);
+        expect(res.body.asked).toBe(0);
+    });
+
+    test("an untagged person is not chased — they are not being paid yet", async () => {
+        // `manager` is deliberately left untagged by the fixture.
+        const res = mockRes();
+        await profiles.remindMissingBank(asAdmin({ body: {} }), res);
+        expect(res.body.people.some((p) => p.email === manager.email)).toBe(false);
     });
 });
 
@@ -505,10 +563,13 @@ describe("access", () => {
         return { passed, res };
     };
 
+    // An accountant is an employee with the tag, reaching payroll on the
+    // ordinary employee token — which carries no `kind` at all.
     let accountant;
     beforeEach(async () => {
-        accountant = await Accountant.create({
+        accountant = await Employee.create({
             name: "Acc", email: "acc@test.com", password: "secret123",
+            manager: manager._id, canPreparePayroll: true,
         });
     });
 
@@ -517,29 +578,55 @@ describe("access", () => {
         jwt.sign({ id: String(id), kind }, process.env.JWT_SECRET, { expiresIn: "1h" });
     const withToken = (token) => mockReq({ headers: { authorization: `Bearer ${token}` } });
 
-    test("an accountant may prepare", async () => {
-        const { passed } = await run(
-            protectPreparer, withToken(tokenFor(accountant._id, "accountant"))
-        );
+    test("an assigned accountant may prepare", async () => {
+        const { passed } = await run(protectPreparer, withToken(tokenFor(accountant._id)));
         expect(passed).toBe(true);
     });
 
-    test("an accountant may not approve", async () => {
-        const { passed, res } = await run(
-            protectApprover, withToken(tokenFor(accountant._id, "accountant"))
-        );
+    test("an assigned accountant may not approve", async () => {
+        const { passed, res } = await run(protectApprover, withToken(tokenFor(accountant._id)));
         expect(passed).toBe(false);
         expect(res.statusCode).toBe(403);
     });
 
-    test("under maker-checker an admin may not prepare", async () => {
-        const { passed, res } = await run(protectPreparer, withToken(tokenFor(admin._id, "admin")));
+    // The tag is the whole gate: without it an employee token is worth
+    // nothing here, however valid it is for their own dashboard.
+    test("an employee who is not an accountant cannot reach payroll", async () => {
+        const { passed, res } = await run(protectPreparer, withToken(tokenFor(employee._id)));
         expect(passed).toBe(false);
-        expect(res.statusCode).toBe(403);
-        expect(res.body.message).toMatch(/accountant/i);
+        expect(res.statusCode).toBe(401);
     });
 
-    test("switched to single-approver, an admin may prepare", async () => {
+    test("an unassigned manager cannot reach payroll", async () => {
+        const { passed, res } = await run(protectPreparer, withToken(tokenFor(manager._id)));
+        expect(passed).toBe(false);
+        expect(res.statusCode).toBe(401);
+    });
+
+    test("an assigned manager may prepare", async () => {
+        manager.canPreparePayroll = true;
+        await manager.save();
+        const { passed } = await run(protectPreparer, withToken(tokenFor(manager._id)));
+        expect(passed).toBe(true);
+    });
+
+    test("an assigned manager still may not approve", async () => {
+        manager.canPreparePayroll = true;
+        await manager.save();
+        const { passed, res } = await run(protectApprover, withToken(tokenFor(manager._id)));
+        expect(passed).toBe(false);
+        expect(res.statusCode).toBe(403);
+    });
+
+    // Preparing is open to both roles. Separation of duties is not "an admin
+    // may not prepare" — it is "nobody approves their own work", which
+    // approveRun enforces by comparing the approver to the preparer.
+    test("under maker-checker an admin may still prepare", async () => {
+        const { passed } = await run(protectPreparer, withToken(tokenFor(admin._id, "admin")));
+        expect(passed).toBe(true);
+    });
+
+    test("and under single-approver too", async () => {
         const settings = await getSettings();
         settings.approvalDepth = "single";
         await settings.save();
@@ -552,9 +639,16 @@ describe("access", () => {
         expect(passed).toBe(true);
     });
 
-    test("a deactivated accountant is locked out", async () => {
-        accountant.isActive = false;
+    test("un-assigning locks them out immediately", async () => {
+        accountant.canPreparePayroll = false;
         await accountant.save();
+        const { passed, res } = await run(protectPreparer, withToken(tokenFor(accountant._id)));
+        expect(passed).toBe(false);
+        expect(res.statusCode).toBe(401);
+    });
+
+    // The separate accountant login is gone, and so is any token it minted.
+    test("a token from the old accountant login is refused", async () => {
         const { passed, res } = await run(
             protectPreparer, withToken(tokenFor(accountant._id, "accountant"))
         );
@@ -579,52 +673,166 @@ describe("access", () => {
     });
 });
 
-// ─────────────────────── accountant logins ────────────────────────────────
+// ────────────────── assigning an accountant ──────────────────
 
-describe("accountant logins", () => {
-    test("an admin creates one and is shown the password once", async () => {
+describe("assigning an accountant", () => {
+    const assign = async (personId, personType = "employee") => {
         const res = mockRes();
-        await config.createAccountant(
-            asAdmin({ body: { name: "Acc", email: "acc@test.com" } }), res
+        await config.assignAccountant(
+            asAdmin({ body: { personId: String(personId), personType } }), res
         );
+        return res;
+    };
+
+    const unassign = async (personId, type = "employee") => {
+        const res = mockRes();
+        await config.unassignAccountant(
+            asAdmin({ params: { type, id: String(personId) } }), res
+        );
+        return res;
+    };
+
+    test("an admin assigns an employee, and no password is involved", async () => {
+        const res = await assign(employee._id);
         expect(res.statusCode).toBe(201);
-        expect(res.body.temporaryPassword).toHaveLength(14);
-        // ...and it is not what is stored.
-        const saved = await Accountant.findOne({ email: "acc@test.com" });
-        expect(saved.password).not.toBe(res.body.temporaryPassword);
+        expect(res.body.temporaryPassword).toBeUndefined();
+        const saved = await Employee.findById(employee._id);
+        expect(saved.canPreparePayroll).toBe(true);
+        expect(saved.payrollAssignedAt).toBeTruthy();
     });
 
-    test("they can sign in with it", async () => {
-        const created = mockRes();
-        await config.createAccountant(asAdmin({ body: { email: "acc@test.com" } }), created);
+    test("who assigned them is recorded", async () => {
+        await assign(employee._id);
+        const saved = await Employee.findById(employee._id);
+        expect(saved.payrollAssignedByName).toBe(admin.email);
+    });
+
+    test("they then show up in the list", async () => {
+        await assign(employee._id);
         const res = mockRes();
-        await config.loginAccountant(
-            mockReq({ body: { email: "acc@test.com", password: created.body.temporaryPassword } }),
-            res
-        );
-        expect(res.statusCode).toBe(200);
-        expect(res.body.token).toBeTruthy();
+        await config.listAccountants(asAdmin(), res);
+        expect(res.body.total).toBe(1);
+        expect(res.body.items[0].email).toBe("e@test.com");
     });
 
-    test("a wrong password says nothing about whether the account exists", async () => {
-        await config.createAccountant(asAdmin({ body: { email: "acc@test.com" } }), mockRes());
-        const wrongPassword = mockRes();
-        await config.loginAccountant(
-            mockReq({ body: { email: "acc@test.com", password: "nope" } }), wrongPassword
-        );
-        const noSuchUser = mockRes();
-        await config.loginAccountant(
-            mockReq({ body: { email: "nobody@test.com", password: "nope" } }), noSuchUser
-        );
-        expect(wrongPassword.body.message).toBe(noSuchUser.body.message);
-        expect(wrongPassword.statusCode).toBe(noSuchUser.statusCode);
-    });
-
-    test("a duplicate email is refused", async () => {
-        await config.createAccountant(asAdmin({ body: { email: "acc@test.com" } }), mockRes());
+    test("the list never carries a password hash", async () => {
+        await assign(employee._id);
         const res = mockRes();
-        await config.createAccountant(asAdmin({ body: { email: "acc@test.com" } }), res);
+        await config.listAccountants(asAdmin(), res);
+        expect(res.body.items[0].password).toBeUndefined();
+    });
+
+    test("assigning the same person twice is refused", async () => {
+        await assign(employee._id);
+        const res = await assign(employee._id);
         expect(res.statusCode).toBe(409);
+    });
+
+    test("an unknown employee is refused", async () => {
+        const res = await assign(new mongoose.Types.ObjectId());
+        expect(res.statusCode).toBe(404);
+    });
+
+    test("a malformed id is refused rather than searched for", async () => {
+        const res = await assign("not-an-id");
+        expect(res.statusCode).toBe(400);
+    });
+
+    test("un-assigning leaves the employee otherwise untouched", async () => {
+        await assign(employee._id);
+        const res = await unassign(employee._id);
+        expect(res.statusCode).toBe(200);
+        const saved = await Employee.findById(employee._id);
+        expect(saved.canPreparePayroll).toBe(false);
+        // Still an employee: same login, same manager.
+        expect(saved.email).toBe("e@test.com");
+        expect(String(saved.manager)).toBe(String(manager._id));
+    });
+
+    test("un-assigning somebody who was never assigned is refused", async () => {
+        const res = await unassign(employee._id);
+        expect(res.statusCode).toBe(409);
+    });
+
+    test("an unknown person type is refused", async () => {
+        const res = await assign(employee._id, "contractor");
+        expect(res.statusCode).toBe(400);
+    });
+
+    // A manager is a member of staff who manages people, so they are
+    // assignable on the same terms.
+    test("a manager can be assigned too", async () => {
+        const res = await assign(manager._id, "manager");
+        expect(res.statusCode).toBe(201);
+        expect(res.body.personType).toBe("Manager");
+        const saved = await Manager.findById(manager._id);
+        expect(saved.canPreparePayroll).toBe(true);
+    });
+
+    test("an assigned manager appears in the list, marked as one", async () => {
+        await assign(manager._id, "manager");
+        const res = mockRes();
+        await config.listAccountants(asAdmin(), res);
+        expect(res.body.total).toBe(1);
+        expect(res.body.items[0].personType).toBe("Manager");
+        expect(res.body.items[0].email).toBe("m@test.com");
+    });
+
+    test("employees and managers come back in one list", async () => {
+        await assign(employee._id);
+        await assign(manager._id, "manager");
+        const res = mockRes();
+        await config.listAccountants(asAdmin(), res);
+        expect(res.body.total).toBe(2);
+        expect(res.body.items.map((i) => i.personType).sort())
+            .toEqual(["Employee", "Manager"]);
+    });
+
+    test("un-assigning a manager needs the manager type", async () => {
+        await assign(manager._id, "manager");
+        // The same id under the wrong type is simply not found, rather than
+        // quietly un-assigning the wrong person.
+        const wrong = await unassign(manager._id, "employee");
+        expect(wrong.statusCode).toBe(404);
+        const right = await unassign(manager._id, "manager");
+        expect(right.statusCode).toBe(200);
+        const saved = await Manager.findById(manager._id);
+        expect(saved.canPreparePayroll).toBe(false);
+    });
+
+    test("candidates include managers", async () => {
+        const res = mockRes();
+        await config.listAccountantCandidates(asAdmin(), res);
+        const mgr = res.body.items.find((i) => i.email === "m@test.com");
+        expect(mgr).toBeTruthy();
+        expect(mgr.personType).toBe("Manager");
+    });
+
+    test("candidates exclude whoever is already an accountant", async () => {
+        await assign(employee._id);
+        await assign(manager._id, "manager");
+        const res = mockRes();
+        await config.listAccountantCandidates(asAdmin(), res);
+        expect(res.body.items.some((i) => i.email === "e@test.com")).toBe(false);
+        expect(res.body.items.some((i) => i.email === "m@test.com")).toBe(false);
+    });
+
+    test("candidates can be searched by name or email", async () => {
+        await Employee.create({
+            name: "Zarina Khan", email: "zarina@test.com",
+            password: "secret123", manager: manager._id,
+        });
+        const byName = mockRes();
+        await config.listAccountantCandidates(asAdmin({ query: { q: "zarina" } }), byName);
+        expect(byName.body.items).toHaveLength(1);
+        expect(byName.body.items[0].email).toBe("zarina@test.com");
+    });
+
+    test("a regex in the search box is treated as text", async () => {
+        const res = mockRes();
+        await config.listAccountantCandidates(asAdmin({ query: { q: ".*" } }), res);
+        expect(res.statusCode).toBe(200);
+        expect(res.body.items).toHaveLength(0);
     });
 });
 

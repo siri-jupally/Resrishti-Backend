@@ -51,6 +51,46 @@ const managerSchema = new mongoose.Schema(
     idProofNumber: { type: String },
     idProofDocument: { type: String },
 
+    /*
+      Bank account for salary. The person's own, not payroll's.
+
+      It lives here rather than on the PayrollProfile because the employee is
+      the one who knows the account number, and typing it themselves is both
+      better data and one less thing an accountant handles. Payroll reads it;
+      it does not own it.
+
+      Deliberately NOT part of isProfileComplete — a new joiner rarely has
+      these details on their first morning, and blocking setup over it would
+      stop them using the app at all. A missing account shows as a standing
+      reminder on their dashboard and as a warning on the payroll run instead.
+
+      Changing an account is the classic salary-redirect fraud, so every change
+      is kept in bankHistory and the employee is emailed. `bankUpdatedAt` lets
+      a run flag an account that moved after it was generated.
+    */
+    bank: {
+        accountHolderName: { type: String, trim: true },
+        accountNumber: { type: String, trim: true },
+        ifsc: { type: String, trim: true, uppercase: true },
+        bankName: { type: String, trim: true },
+        branch: { type: String, trim: true },
+        _id: false,
+    },
+    bankUpdatedAt: { type: Date },
+    bankHistory: [
+        {
+            // Only the last four digits of what it was — enough to see that it
+            // changed and to recognise the old account, without keeping a
+            // second full copy of it around.
+            accountNumberLast4: String,
+            ifsc: String,
+            bankName: String,
+            changedAt: { type: Date, default: Date.now },
+            changedByName: String,
+            _id: false,
+        },
+    ],
+
     // Job fields (set by admin at creation, read-only for manager)
     jobRole: { type: String },
     // Admin-assigned job role and optional individual exception. Same meaning
@@ -66,6 +106,18 @@ const managerSchema = new mongoose.Schema(
     // Client-Management module — job tags (not roles).
     canSupervise: { type: Boolean, default: false },
     canCoordinate: { type: Boolean, default: false },
+
+    // Payroll module — see the same three fields on Employee. A manager can
+    // be assigned as the payroll accountant too, because in this organisation
+    // a manager is an employee who happens to manage people.
+    //
+    // Note for whoever unifies the two models: this is one of the places the
+    // duplication shows. The tag, the assignment stamp and the gate in
+    // middleware/authPayroll.js all exist twice for no reason other than that
+    // Employee and Manager are separate collections.
+    canPreparePayroll: { type: Boolean, default: false },
+    payrollAssignedAt: { type: Date },
+    payrollAssignedByName: { type: String, trim: true },
   },
   { timestamps: true }
 );

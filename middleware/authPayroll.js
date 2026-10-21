@@ -4,21 +4,33 @@
   Three middlewares, because the module's whole control model is that
   preparing and approving are different jobs:
 
-    protectPayroll   — an accountant or an admin. Reading a register, listing
-                       profiles, seeing a draft run.
-    protectPreparer  — whoever may prepare and calculate. The accountant, and
-                       the admin when the office runs single-approver.
-    protectApprover  — admin only. Approving, locking and reopening a run, and
+    protectPayroll   — an assigned accountant or an admin. Reading a register,
+                       listing profiles, seeing a draft run.
+    protectPreparer  — whoever may prepare and calculate: the accountant, and
+                       an admin too (see the note on that middleware).
+    protectApprover  — admin only. Approving, closing and reopening a run, and
                        setting people's pay.
 
-  A payroll token carries `kind: "accountant"` so it can never be replayed
-  against an admin endpoint, and vice versa — the same defence the client
-  portal uses.
+  There is no accountant login. An accountant is a member of staff an admin
+  has assigned (`canPreparePayroll` on Employee or Manager), and they reach
+  payroll with their ordinary token — one set of credentials per person, and
+  no account to forget to revoke when they move on.
+
+  Employee and Manager are checked separately only because they are separate
+  collections. A manager here is an employee who manages people; when the two
+  models are merged this becomes one lookup.
+
+  That merge does not weaken maker–checker, because the control was never in
+  the separate login: approving is still admin-only, and approveRun still
+  refuses an approver who prepared the run.
+
+  A client-portal token, and the old `kind: "accountant"` token from the
+  separate login, are both refused outright.
 */
 const jwt = require("jsonwebtoken");
 const Admin = require("../models/Admin");
-const Accountant = require("../models/Accountant");
-const { getSettings } = require("../utils/payrollDefaults");
+const Employee = require("../models/Employee");
+const Manager = require("../models/Manager");
 
 const bearer = (req) => {
     const header = req.headers.authorization;
@@ -32,7 +44,7 @@ const stale = (user, decoded) =>
     decoded.iat * 1000 < user.passwordChangedAt.getTime();
 
 /**
- * Resolve whoever is calling into req.admin or req.accountant.
+ * Resolve whoever is calling into req.admin or req.payrollEmployee.
  * Returns null when the token is no good.
  */
 const resolveActor = async (req) => {
@@ -50,19 +62,41 @@ const resolveActor = async (req) => {
     // A client-portal token must never reach payroll.
     if (decoded.kind === "client") return null;
 
-    if (decoded.kind === "accountant") {
-        const accountant = await Accountant.findById(decoded.id).select("-password");
-        if (!accountant || !accountant.isActive) return null;
-        if (stale(accountant, decoded)) return { expired: true };
-        req.accountant = accountant;
+    // The separate accountant login is gone. Any token still carrying its kind
+    // was minted before the change and is not honoured — the point of the
+    // change is that those credentials no longer exist.
+    if (decoded.kind === "accountant") return null;
+
+    const admin = await Admin.findById(decoded.id).select("-password");
+    if (admin) {
+        if (stale(admin, decoded)) return { expired: true };
+        req.admin = admin;
+        return { role: "admin" };
+    }
+
+    /*
+      A staff token. Payroll is open only to somebody an admin has assigned as
+      an accountant; for everybody else this is indistinguishable from a token
+      with no payroll rights at all, which is what we want it to look like —
+      the endpoint should not confirm that the caller is a real user.
+
+      Employee first because that is the common case, and the tokens are
+      identical in shape (a bare `{ id }`), so there is nothing to tell them
+      apart but the collection the id is in.
+    */
+    const employee = await Employee.findById(decoded.id).select("-password");
+    if (employee) {
+        if (!employee.canPreparePayroll) return null;
+        if (stale(employee, decoded)) return { expired: true };
+        req.payrollEmployee = employee;
         return { role: "accountant" };
     }
 
-    const admin = await Admin.findById(decoded.id).select("-password");
-    if (!admin) return null;
-    if (stale(admin, decoded)) return { expired: true };
-    req.admin = admin;
-    return { role: "admin" };
+    const manager = await Manager.findById(decoded.id).select("-password");
+    if (!manager || !manager.canPreparePayroll) return null;
+    if (stale(manager, decoded)) return { expired: true };
+    req.payrollManager = manager;
+    return { role: "accountant" };
 };
 
 const deny = (res, actor) =>
@@ -85,18 +119,26 @@ const protectPayroll = async (req, res, next) => {
  * when the office has chosen single-approver — under maker–checker the admin
  * approves, and letting them also prepare would collapse the control.
  */
+/*
+  Who may prepare: both the accountant and an admin.
+
+  This used to refuse admins under maker–checker, on the reasoning that an
+  admin's job is to approve. In practice that left a month unrunnable whenever
+  the accountant was away, and it is not what separation of duties requires —
+  the rule is that one person must not approve their own work, not that a role
+  is barred from the work.
+
+  So preparing is open to both, and the separation is enforced where it
+  actually matters: approveRun compares the approver against whoever prepared
+  the run and refuses if they are the same person (under makerChecker). An
+  admin who prepares a run therefore needs a second admin to approve it, and
+  the dashboard warns them of that at generate time rather than at the end.
+*/
 const protectPreparer = async (req, res, next) => {
     const actor = await resolveActor(req);
     if (!actor?.role) return deny(res, actor);
-    if (actor.role === "accountant") return next();
-
-    const settings = await getSettings();
-    if (settings.approvalDepth === "single") return next();
-
-    return res.status(403).json({
-        message:
-            "Under maker–checker an admin approves payroll rather than preparing it. Ask the accountant to prepare this run, or switch payroll to single-approver in settings.",
-    });
+    if (actor.role === "accountant" || actor.role === "admin") return next();
+    return deny(res, actor);
 };
 
 /** Approving, locking, reopening, and setting what people are paid. */

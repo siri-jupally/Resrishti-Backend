@@ -133,8 +133,12 @@ const computeLine = ({
                 tally.worked += result.weight;
                 if (result.weight < 1) tally.halfDays += 1;
                 // Overtime is a day worked when the person was not due in.
+                // An admin can take a single day out of extra pay in the
+                // month review; the day still counts as worked, it just
+                // stops earning the overtime premium.
                 if (
                     profile.overtimeEligible &&
+                    !record.extraPayExcluded &&
                     settings?.overtime?.enabled &&
                     ((day.kind === "weeklyOff" && settings.overtime.countWeeklyOff) ||
                         (day.kind === "holiday" && settings.overtime.countHoliday))

@@ -79,6 +79,12 @@ router.get('/attendance/locks', protect, attendanceLock.listLocks);
 router.get('/attendance/locks/:month', protect, attendanceLock.getLock);
 // Every unresolved record standing between the month and being closed.
 router.get('/attendance/locks/:month/issues', protect, require('../controllers/attendanceLockIssues').getMonthIssues);
+// Extra-pay days and leave days: already decided, but they are where
+// attendance turns into money, so an admin signs them off before the close.
+const lockSettlements = require('../controllers/attendanceLockSettlements');
+router.get('/attendance/locks/:month/settlements', protect, lockSettlements.getSettlements);
+router.post('/attendance/locks/:month/confirm', protect, lockSettlements.confirmSettlement);
+router.patch('/attendance/locks/:month/extra-pay/:type/:id', protect, lockSettlements.adjustExtraPay);
 router.post('/attendance/locks/:month/lock', protect, attendanceLock.lockMonth);
 router.post('/attendance/locks/:month/reopen', protect, attendanceLock.reopenMonth);
 
@@ -97,6 +103,13 @@ router.route('/managers/:id')
     .delete(protect, deleteManager);
 
 // Employee oversight
+/*
+  Everybody who works here, in one list, with role as a field rather than as
+  the choice of endpoint - a manager is a member of staff whose role is
+  manager. The two older lists stay for the screens that still use them.
+*/
+router.get('/staff', protect, require('../controllers/adminStaffController').listStaff);
+
 router.get('/employees', protect, listAllEmployees);
 router.patch('/employees/:id/reassign', protect, reassignEmployee);
 

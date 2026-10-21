@@ -73,6 +73,46 @@ const employeeSchema = new mongoose.Schema(
     idProofNumber: { type: String },
     idProofDocument: { type: String }, // S3 key or URL
 
+    /*
+      Bank account for salary. The person's own, not payroll's.
+
+      It lives here rather than on the PayrollProfile because the employee is
+      the one who knows the account number, and typing it themselves is both
+      better data and one less thing an accountant handles. Payroll reads it;
+      it does not own it.
+
+      Deliberately NOT part of isProfileComplete — a new joiner rarely has
+      these details on their first morning, and blocking setup over it would
+      stop them using the app at all. A missing account shows as a standing
+      reminder on their dashboard and as a warning on the payroll run instead.
+
+      Changing an account is the classic salary-redirect fraud, so every change
+      is kept in bankHistory and the employee is emailed. `bankUpdatedAt` lets
+      a run flag an account that moved after it was generated.
+    */
+    bank: {
+        accountHolderName: { type: String, trim: true },
+        accountNumber: { type: String, trim: true },
+        ifsc: { type: String, trim: true, uppercase: true },
+        bankName: { type: String, trim: true },
+        branch: { type: String, trim: true },
+        _id: false,
+    },
+    bankUpdatedAt: { type: Date },
+    bankHistory: [
+        {
+            // Only the last four digits of what it was — enough to see that it
+            // changed and to recognise the old account, without keeping a
+            // second full copy of it around.
+            accountNumberLast4: String,
+            ifsc: String,
+            bankName: String,
+            changedAt: { type: Date, default: Date.now },
+            changedByName: String,
+            _id: false,
+        },
+    ],
+
     // Job fields (set by manager at creation, read-only for employee)
     jobRole: { type: String },
     department: { type: String },
@@ -83,6 +123,18 @@ const employeeSchema = new mongoose.Schema(
     // canCoordinate: can triage incoming client pickup requests (typically Admin/Manager only).
     canSupervise: { type: Boolean, default: false },
     canCoordinate: { type: Boolean, default: false },
+
+    // Payroll module — another job tag, in the same spirit as the two above.
+    // An employee an admin has assigned as the payroll accountant prepares and
+    // calculates runs, exports the bank file and records payments, through
+    // their ordinary employee login. There is no separate accountant account.
+    //
+    // Approving stays with admins, so maker–checker survives: the control is
+    // that one person must not approve their own work, not that the preparer
+    // holds a different kind of credential.
+    canPreparePayroll: { type: Boolean, default: false },
+    payrollAssignedAt: { type: Date },
+    payrollAssignedByName: { type: String, trim: true },
   },
   { timestamps: true }
 );

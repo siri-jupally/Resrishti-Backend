@@ -168,12 +168,35 @@ describe("readiness", () => {
         expect(readiness.blockers.some((b) => b.key === "leaves")).toBe(true);
     });
 
-    test("a decided leave does not", async () => {
+    /*
+      A decided leave is not awaiting anybody's decision - but it is paid or
+      unpaid days going into the month's pay, so it asks the admin to confirm
+      the figure before the month closes. See attendanceLockSettlements.js.
+    */
+    test("a decided leave is not awaiting a decision, but does await confirmation", async () => {
         await Leave.create({
             employee: employee._id, type: "casual",
             startDate: "2026-03-01", endDate: "2026-03-02",
             reason: "Family", status: "approved",
         });
+        const readiness = await locks.readinessFor(MONTH);
+        expect(readiness.blockers.some((b) => b.key === "leaves")).toBe(false);
+        expect(readiness.blockers.some((b) => b.key === "leaveUnconfirmed")).toBe(true);
+        expect(readiness.ready).toBe(false);
+    });
+
+    test("once the leave is confirmed the month is ready", async () => {
+        await Leave.create({
+            employee: employee._id, type: "casual",
+            startDate: "2026-03-01", endDate: "2026-03-02",
+            reason: "Family", status: "approved",
+        });
+        const settlements = require("../controllers/attendanceLockSettlements");
+        const res = mockRes();
+        await settlements.confirmSettlement(
+            asAdmin({ params: { month: MONTH }, body: { kind: "leave" } }), res
+        );
+        expect(res.statusCode).toBe(200);
         const readiness = await locks.readinessFor(MONTH);
         expect(readiness.ready).toBe(true);
     });

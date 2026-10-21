@@ -1982,66 +1982,97 @@ describe("Frontend-Backend Contract - Response Shapes", () => {
         });
     });
 
-    test("BUG: Admin reports frontend expects 'summary' and 'employees' keys but backend sends 'orgSummary' and 'employeeReports'", async () => {
-        // Frontend AdminAttendanceTab.jsx line 598: data?.summary
-        // Frontend AdminAttendanceTab.jsx line 605: data.summary.avgAttendance
-        // Frontend AdminAttendanceTab.jsx line 609: data.summary.totalWorkingDays
-        // Frontend AdminAttendanceTab.jsx line 613: data.summary.totalLateCheckins
-        // Frontend AdminAttendanceTab.jsx line 634: data?.employees
-        //
-        // Backend attendanceAdminController.js line 198 sends:
-        //   { from, to, orgSummary, employeeReports }
-        //
-        // The frontend looks for `data.summary` but the backend sends `data.orgSummary`.
-        // The frontend looks for `data.employees` but the backend sends `data.employeeReports`.
-        //
-        // Additionally, the backend orgSummary does NOT include:
-        //   - avgAttendance (frontend tries to display data.summary.avgAttendance)
-        //   - totalWorkingDays (frontend tries to display data.summary.totalWorkingDays)
-        //   - totalLateCheckins (frontend tries to display data.summary.totalLateCheckins)
-        //
-        // The backend sends: totalEmployees, totalRecords, totalPresent, totalAbsent,
-        //   totalLeave, totalWfh, totalLate
-
+    /*
+      These two tests used to assert the bug: the handler only accepted
+      ?from=&to= while the report screen asked by month, so every request came
+      back 400, and the response keys were orgSummary / employeeReports while
+      the screen read summary / employees. Both ends now agree.
+    */
+    test("Admin reports accept a month and answer with summary and employees", async () => {
         await Attendance.create({
             employee: employee._id,
             date: "2026-03-20",
             status: "present",
+            workingHours: 8,
+            approvalStatus: "auto-approved",
         });
 
         const { getReports } = require("../controllers/attendanceAdminController");
-        const req = mockReq({
-            query: { from: "2026-03-01", to: "2026-03-31" },
-        });
+        const req = mockReq({ query: { month: "2026-03" } });
         const res = mockRes();
         await getReports(req, res);
 
-        // Backend sends these keys:
+        expect(res.statusCode).not.toBe(400);
+        expect(res.body).toHaveProperty("summary");
+        expect(res.body).toHaveProperty("employees");
+        expect(res.body.month).toBe("2026-03");
+        expect(res.body.from).toBe("2026-03-01");
+        expect(res.body.to).toBe("2026-03-31");
+
+        // The three figures the screen puts in its header.
+        expect(res.body.summary).toHaveProperty("avgAttendance");
+        expect(res.body.summary).toHaveProperty("totalWorkingDays");
+        expect(res.body.summary).toHaveProperty("totalLateCheckins");
+        expect(res.body.summary.totalWorkingDays).toBeGreaterThan(0);
+
+        // The old names still answer, so nothing that read them breaks.
         expect(res.body).toHaveProperty("orgSummary");
         expect(res.body).toHaveProperty("employeeReports");
 
-        // Frontend expects these keys (which DON'T exist):
-        expect(res.body).not.toHaveProperty("summary");
-        expect(res.body).not.toHaveProperty("employees");
-
-        // Frontend also expects fields that backend doesn't send:
-        expect(res.body.orgSummary).not.toHaveProperty("avgAttendance");
-        expect(res.body.orgSummary).not.toHaveProperty("totalWorkingDays");
-        expect(res.body.orgSummary).not.toHaveProperty("totalLateCheckins");
+        const row = res.body.employees.find(
+            (e) => String(e.employee._id) === String(employee._id)
+        );
+        expect(row.present).toBe(1);
+        expect(row.totalHours).toBe(8);
     });
 
-    test("BUG: Admin reports frontend expects 'month' param but backend expects 'from'/'to' date range", () => {
-        // Frontend line 565:
-        //   axios.get(`${API}/api/admin/attendance/reports?month=${month}&year=${year}`)
-        //
-        // Backend line 124-125:
-        //   const from = req.query.from;
-        //   const to = req.query.to;
-        //
-        // Frontend sends month+year, backend expects from+to.
-        // This means the admin reports page will ALWAYS get a 400 error:
-        //   "from and to date params are required"
-        expect(true).toBe(true); // critical frontend-backend mismatch
+    test("Admin reports accept the screen's month and year pair", async () => {
+        const { getReports } = require("../controllers/attendanceAdminController");
+        const req = mockReq({ query: { month: "3", year: "2026" } });
+        const res = mockRes();
+        await getReports(req, res);
+
+        expect(res.statusCode).not.toBe(400);
+        expect(res.body.month).toBe("2026-03");
+    });
+
+    test("Admin reports still accept an explicit date range", async () => {
+        const { getReports } = require("../controllers/attendanceAdminController");
+        const req = mockReq({ query: { from: "2026-03-01", to: "2026-03-31" } });
+        const res = mockRes();
+        await getReports(req, res);
+
+        expect(res.statusCode).not.toBe(400);
+        expect(res.body.month).toBeNull();
+        expect(res.body.summary.totalWorkingDays).toBeGreaterThan(0);
+    });
+
+    test("Admin reports refuse a request with neither a month nor a range", async () => {
+        const { getReports } = require("../controllers/attendanceAdminController");
+        const req = mockReq({ query: {} });
+        const res = mockRes();
+        await getReports(req, res);
+
+        expect(res.statusCode).toBe(400);
+    });
+
+    /*
+      Absence has no attendance record, so counting rows with status "absent"
+      reports almost nothing. The report lays the month out from the calendar
+      and treats a working day with nothing against it as absent, which is how
+      payroll reads the same month.
+    */
+    test("A working day with no record counts as absent, not as nothing", async () => {
+        const { getReports } = require("../controllers/attendanceAdminController");
+        const req = mockReq({ query: { month: "2026-03" } });
+        const res = mockRes();
+        await getReports(req, res);
+
+        const row = res.body.employees.find(
+            (e) => String(e.employee._id) === String(employee._id)
+        );
+        expect(row.dueDays).toBeGreaterThan(0);
+        expect(row.absent).toBe(row.dueDays);
     });
 });
 
