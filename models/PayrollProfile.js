@@ -105,7 +105,18 @@ const payrollProfileSchema = new mongoose.Schema(
         payrollStartDate: { type: String },
         payrollEndDate: { type: String },
 
-        // ---- filled in later, from the frontend, once the app is live ------
+        /*
+          DEPRECATED - nothing reads this.
+
+          Bank details live on the person: Employee.bank / Manager.bank, typed
+          in by them on their own profile, emailed to them on every change and
+          kept in bankHistory. That is what the bank file and the payment
+          screen read. This copy existed for an accountant to type into, which
+          meant two accounts on record and no rule about which one got paid.
+
+          Left in place rather than dropped so that any details already typed
+          here are still recoverable; it can go once nobody's data needs it.
+        */
         bank: {
             accountHolderName: { type: String, trim: true },
             accountNumber: { type: String, trim: true },

@@ -1,5 +1,6 @@
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
+const { sendEmail } = require("../utils/emailService");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
@@ -28,6 +29,75 @@ function computeProfileComplete(user) {
     const required = ["name", "dateOfBirth", "gender", "phone", "currentAddress"];
     return required.every((f) => user[f] && String(user[f]).trim() !== "");
 }
+
+
+/*
+  Bank account changes, applied to an Employee or a Manager.
+
+  The employee owns their salary account, which means they can also change it —
+  and changing an account shortly before payday is the classic salary-redirect
+  fraud. So every change keeps the previous account's last four digits in
+  `bankHistory`, stamps `bankUpdatedAt` (a payroll run reads that to flag an
+  account which moved after the run was generated), and emails the person, so a
+  change they did not make does not go unnoticed.
+
+  Returns true when something actually changed, so the caller only emails then.
+*/
+const BANK_FIELDS = ["accountHolderName", "accountNumber", "ifsc", "bankName", "branch"];
+
+const applyBankChange = (user, incoming, actorName) => {
+    if (!incoming || typeof incoming !== "object") return false;
+
+    const next = {};
+    for (const f of BANK_FIELDS) {
+        if (incoming[f] !== undefined) next[f] = String(incoming[f] || "").trim();
+    }
+    if (Object.keys(next).length === 0) return false;
+
+    const before = user.bank ? (user.bank.toObject ? user.bank.toObject() : user.bank) : {};
+    const merged = { ...before, ...next };
+
+    if (BANK_FIELDS.every((f) => (merged[f] || "") === (before[f] || ""))) return false;
+
+    // Only the account identity matters for the audit trail — a corrected
+    // spelling of the bank's name is not a redirect.
+    const identityChanged =
+        (merged.accountNumber || "") !== (before.accountNumber || "") ||
+        (merged.ifsc || "") !== (before.ifsc || "");
+
+    if (identityChanged && before.accountNumber) {
+        user.bankHistory = user.bankHistory || [];
+        user.bankHistory.push({
+            accountNumberLast4: String(before.accountNumber).slice(-4),
+            ifsc: before.ifsc,
+            bankName: before.bankName,
+            changedAt: new Date(),
+            changedByName: actorName,
+        });
+    }
+
+    user.bank = merged;
+    user.bankUpdatedAt = new Date();
+    return true;
+};
+
+/** Tell the person their salary account changed. Best-effort. */
+const notifyBankChange = async (user) => {
+    try {
+        await sendEmail({
+            to: user.email,
+            subject: "Your salary account was updated",
+            html: `<p>Hello ${user.name || ""},</p>
+                   <p>The bank account your salary is paid into was just changed on your
+                   ReSrishti profile. Payments will now go to the account ending
+                   <strong>${String(user.bank?.accountNumber || "").slice(-4)}</strong>.</p>
+                   <p>If you did not make this change, tell your administrator straight away.</p>`,
+        });
+    } catch (err) {
+        // A failed notification must never fail the profile save.
+        console.error("Bank-change email failed:", err.message);
+    }
+};
 
 // ==================== EMPLOYEE PROFILE ====================
 
@@ -91,8 +161,13 @@ const updateEmployeeProfile = async (req, res) => {
             }
         }
 
+        // Bank details are deliberately not in PROFILE_FIELDS: they need the
+        // change history and the notification, so they go through here.
+        const bankChanged = applyBankChange(employee, req.body.bank, employee.name);
+
         employee.isProfileComplete = computeProfileComplete(employee);
         await employee.save();
+        if (bankChanged) await notifyBankChange(employee);
 
         const updated = await Employee.findById(employee._id)
             .select("-password")
@@ -161,8 +236,13 @@ const updateManagerProfile = async (req, res) => {
             }
         }
 
+        // Bank details are deliberately not in PROFILE_FIELDS: they need the
+        // change history and the notification, so they go through here.
+        const bankChanged = applyBankChange(manager, req.body.bank, manager.name);
+
         manager.isProfileComplete = computeProfileComplete(manager);
         await manager.save();
+        if (bankChanged) await notifyBankChange(manager);
 
         const updated = await Manager.findById(manager._id).select("-password");
         res.json(updated);
@@ -176,10 +256,15 @@ const updateManagerProfile = async (req, res) => {
 // GET /api/manager/employees/:id/profile
 const getEmployeeProfileByManager = async (req, res) => {
     try {
+        // A manager has no business with their team's salary accounts — that
+        // is between the employee, the accountant and payroll. Excluded here
+        // rather than masked, so it cannot leak through a later field addition.
         const employee = await Employee.findOne({
             _id: req.params.id,
             manager: req.manager._id,
-        }).select("-password").populate("manager", "name email");
+        })
+            .select("-password -bank -bankHistory -bankUpdatedAt")
+            .populate("manager", "name email");
         if (!employee) return res.status(404).json({ message: "Employee not found" });
         res.json(employee);
     } catch (err) {
@@ -235,8 +320,13 @@ const updateEmployeeProfileByAdmin = async (req, res) => {
             if (req.body[f] !== undefined) employee[f] = req.body[f];
         });
 
+        // An admin can correct a bank account too — for somebody who cannot get
+        // into the app, say. The history records who did it either way.
+        const bankChanged = applyBankChange(employee, req.body.bank, "Administrator");
+
         employee.isProfileComplete = computeProfileComplete(employee);
         await employee.save();
+        if (bankChanged) await notifyBankChange(employee);
 
         const updated = await Employee.findById(employee._id)
             .select("-password").populate("manager", "name email");
@@ -268,8 +358,13 @@ const updateManagerProfileByAdmin = async (req, res) => {
             if (req.body[f] !== undefined) manager[f] = req.body[f];
         });
 
+        // An admin can correct a bank account too — for somebody who cannot get
+        // into the app, say. The history records who did it either way.
+        const bankChanged = applyBankChange(manager, req.body.bank, "Administrator");
+
         manager.isProfileComplete = computeProfileComplete(manager);
         await manager.save();
+        if (bankChanged) await notifyBankChange(manager);
 
         const updated = await Manager.findById(manager._id).select("-password");
         res.json(updated);

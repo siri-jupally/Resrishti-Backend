@@ -24,8 +24,13 @@ const payrollAuditSchema = new mongoose.Schema(
 
         // Who. Denormalised name so the log stays readable after somebody
         // leaves and their account is gone.
+        // "Accountant" is kept for rows written while the accountant was a
+        // login of its own. New rows say "Employee" — see utils/payrollActor.
         actor: {
-            userType: { type: String, enum: ["Admin", "Accountant", "System"] },
+            userType: {
+                type: String,
+                enum: ["Admin", "Accountant", "Employee", "Manager", "System"],
+            },
             userId: mongoose.Schema.Types.ObjectId,
             name: String,
             _id: false,

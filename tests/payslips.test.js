@@ -115,7 +115,7 @@ beforeEach(async () => {
     other = await Employee.create({
         name: "Other", email: "o@test.com", password: "secret123", manager: manager._id,
     });
-    run = await PayrollRun.create({ month: MONTH, status: "locked" });
+    run = await PayrollRun.create({ month: MONTH, status: "paid" });
 });
 
 const asAdmin = (o = {}) => mockReq({ admin, params: { month: MONTH }, ...o });
@@ -137,21 +137,30 @@ describe("releasing payslips", () => {
         expect(renderPayslipPdf).toHaveBeenCalledTimes(2);
     });
 
-    test("a run still under review produces none", async () => {
-        run.status = "review";
+    test("a run still awaiting approval produces none", async () => {
+        run.status = "pending-approval";
         await run.save();
         await makeLine(employee, "Employee");
         const res = await release();
         expect(res.statusCode).toBe(409);
-        expect(res.body.message).toMatch(/locked run/i);
+        expect(res.body.message).toMatch(/actually been paid/i);
         expect(renderPayslipPdf).not.toHaveBeenCalled();
     });
 
-    test("an approved but unlocked run produces none either", async () => {
+    test("an approved but unpaid run produces none either", async () => {
+        // Approved means the figures are agreed, not that the money has gone.
+        // A payslip for a salary nobody has received yet is a complaint.
         run.status = "approved";
         await run.save();
         await makeLine(employee, "Employee");
         expect((await release()).statusCode).toBe(409);
+    });
+
+    test("a closed run still releases, for anyone added late", async () => {
+        run.status = "closed";
+        await run.save();
+        await makeLine(employee, "Employee");
+        expect((await release()).statusCode).toBe(200);
     });
 
     test("each payslip gets its own number", async () => {

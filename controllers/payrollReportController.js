@@ -159,7 +159,7 @@ const exportRegisterCsv = async (req, res) => {
 const getTrend = async (req, res) => {
     try {
         const count = Math.min(Math.max(parseInt(req.query.months, 10) || 12, 1), 36);
-        const runs = await PayrollRun.find({ status: { $in: ["approved", "locked"] } })
+        const runs = await PayrollRun.find({ status: { $in: ["approved", "paid", "closed"] } })
             .sort({ month: -1 })
             .limit(count)
             .lean();

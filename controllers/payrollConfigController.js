@@ -1,31 +1,59 @@
 /*
-  payrollConfigController.js — payroll settings, paid-day policies, and the
-  accountant logins.
+  payrollConfigController.js — payroll settings, paid-day policies, and who is
+  assigned as an accountant.
 
   Only the settings the shipped features need are exposed; the rest of the
   configuration hub arrives with the features that want it.
 
+  There is no accountant login to create any more. An accountant is an employee
+  an admin has assigned, and they prepare payroll with their ordinary employee
+  credentials — so this file hands out a job tag rather than a password.
+
   Mounted at /api/payroll.
-    GET   /settings              read (accountant or admin)
-    PUT   /settings              change (admin)
-    GET   /paid-day-policies     list
-    POST  /paid-day-policies     create (admin)
-    PATCH /paid-day-policies/:id edit (admin)
-    POST  /accountants           create an accountant login (admin)
-    GET   /accountants           list them (admin)
-    PATCH /accountants/:id       rename, deactivate, reset password (admin)
-    POST  /accountant/login      sign in
+    GET    /settings              read (accountant or admin)
+    PUT    /settings              change (admin)
+    GET    /paid-day-policies     list
+    POST   /paid-day-policies     create (admin)
+    PATCH  /paid-day-policies/:id edit (admin)
+    GET    /accountants            who is assigned (admin)
+    GET    /accountants/candidates  who could be (admin)
+    POST   /accountants             assign somebody (admin)
+    DELETE /accountants/:type/:id   un-assign them (admin)
 */
-const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
+const mongoose = require("mongoose");
 
 const PaidDayPolicy = require("../models/PaidDayPolicy");
 const PayrollProfile = require("../models/PayrollProfile");
-const Accountant = require("../models/Accountant");
+const Employee = require("../models/Employee");
+const Manager = require("../models/Manager");
 const { getSettings, seedPaidDayPolicies } = require("../utils/payrollDefaults");
 
+/*
+  Staff come in two collections, and the payroll module already names that
+  distinction `personType` everywhere else (PayrollProfile, PayrollLine), so
+  these mirror payrollProfileController rather than inventing a third spelling.
+
+  A manager is an employee who manages people; the two collections are an
+  accident of how the system grew, not a statement about payroll. When they are
+  merged, `normaliseType` and `modelFor` here go away.
+*/
+const normaliseType = (raw) => {
+    const value = String(raw || "").toLowerCase();
+    if (value === "employee") return "Employee";
+    if (value === "manager") return "Manager";
+    return null;
+};
+
+const modelFor = (personType) => (personType === "Employee" ? Employee : Manager);
+
 const actorName = (req) =>
-    req.admin?.name || req.admin?.email || req.accountant?.name || req.accountant?.email || "";
+    req.admin?.name ||
+    req.admin?.email ||
+    req.payrollEmployee?.name ||
+    req.payrollEmployee?.email ||
+    req.payrollManager?.name ||
+    req.payrollManager?.email ||
+    "";
 
 // ---------------------------------------------------------------- settings
 
@@ -220,49 +248,41 @@ const updatePolicy = async (req, res) => {
 };
 
 // ------------------------------------------------------------- accountants
+/*
+  "Accountant" is a job tag on a member of staff, not an account.
 
-const generatePassword = () =>
-    crypto.randomBytes(12).toString("base64").replace(/[^A-Za-z0-9]/g, "").slice(0, 14);
+  The previous design gave each accountant a login of its own, which meant a
+  second set of credentials for somebody who already had one, and a second
+  account to remember to revoke when they changed jobs. Assigning the tag to
+  the record they already have removes both problems, and nothing is lost:
+  approving stays admin-only, and approveRun still refuses an approver who
+  prepared the run.
 
-const createAccountant = async (req, res) => {
-    try {
-        const email = String(req.body?.email || "").trim().toLowerCase();
-        const name = String(req.body?.name || "").trim();
-        if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-            return res.status(400).json({ message: "A valid email is required" });
-        }
-        if (await Accountant.findOne({ email })) {
-            return res.status(409).json({ message: "An accountant with that email already exists" });
-        }
+  Employees and managers are both assignable. A manager who prepares payroll
+  also approves their own team's attendance, which is an input to the pay they
+  are preparing — worth knowing, but it is not unchecked: an admin still
+  approves the run, and nobody may adjust their own line (see adjustLine).
+*/
 
-        // A generated password, shown once. Nobody types a password for
-        // somebody else and remembers to make it a good one.
-        const password = String(req.body?.password || "").trim() || generatePassword();
-        const accountant = await Accountant.create({
-            name: name || undefined,
-            email,
-            password,
-            phone: String(req.body?.phone || "").trim() || undefined,
-            createdByName: actorName(req),
-        });
+/** The fields the panel needs. Never the password. */
+const ACCOUNTANT_FIELDS = "name email phone jobRole department payrollAssignedAt payrollAssignedByName";
 
-        return res.status(201).json({
-            _id: accountant._id,
-            name: accountant.name,
-            email: accountant.email,
-            isActive: accountant.isActive,
-            // Returned once, never stored in the clear and never shown again.
-            temporaryPassword: password,
-        });
-    } catch (err) {
-        console.error("createAccountant error:", err.message);
-        return res.status(500).json({ message: err.message });
-    }
-};
-
+/** Both collections, newest assignment first, as one list. */
 const listAccountants = async (req, res) => {
     try {
-        const items = await Accountant.find({}).select("-password").sort({ createdAt: -1 }).lean();
+        const [employees, managers] = await Promise.all([
+            Employee.find({ canPreparePayroll: true }).select(ACCOUNTANT_FIELDS).lean(),
+            Manager.find({ canPreparePayroll: true }).select(ACCOUNTANT_FIELDS).lean(),
+        ]);
+        const items = [
+            ...employees.map((e) => ({ ...e, personType: "Employee" })),
+            ...managers.map((m) => ({ ...m, personType: "Manager" })),
+        ].sort((a, b) => {
+            const at = a.payrollAssignedAt ? new Date(a.payrollAssignedAt).getTime() : 0;
+            const bt = b.payrollAssignedAt ? new Date(b.payrollAssignedAt).getTime() : 0;
+            if (at !== bt) return bt - at;
+            return String(a.name || a.email).localeCompare(String(b.name || b.email));
+        });
         return res.json({ items, total: items.length });
     } catch (err) {
         console.error("listAccountants error:", err.message);
@@ -270,60 +290,124 @@ const listAccountants = async (req, res) => {
     }
 };
 
-const updateAccountant = async (req, res) => {
+/*
+  Who could be assigned. Searchable, because an office with a few hundred
+  staff should not be scrolled through, and capped so a blank query cannot
+  pull the whole directory down the wire.
+*/
+const CANDIDATE_LIMIT = 25;
+
+const listAccountantCandidates = async (req, res) => {
     try {
-        const accountant = await Accountant.findById(req.params.id);
-        if (!accountant) return res.status(404).json({ message: "Accountant not found" });
-
-        if (req.body.name !== undefined) accountant.name = String(req.body.name).trim();
-        if (req.body.phone !== undefined) accountant.phone = String(req.body.phone).trim();
-        if (req.body.isActive !== undefined) {
-            accountant.isActive = req.body.isActive === true || req.body.isActive === "true";
+        const q = String(req.query?.q || "").trim();
+        const filter = { canPreparePayroll: { $ne: true } };
+        if (q) {
+            // Escaped: a search box is not a place to accept a regex.
+            const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const rx = new RegExp(safe, "i");
+            filter.$or = [{ name: rx }, { email: rx }];
         }
-
-        let temporaryPassword;
-        if (req.body.resetPassword === true || req.body.resetPassword === "true") {
-            temporaryPassword = generatePassword();
-            accountant.password = temporaryPassword;
-        }
-
-        await accountant.save();
-        const saved = accountant.toObject();
-        delete saved.password;
-        return res.json({ ...saved, temporaryPassword });
+        // The limit is applied per collection and then to the merged list, so
+        // a long employee list cannot crowd the managers out of the results.
+        const [employees, managers] = await Promise.all([
+            Employee.find(filter).select("name email jobRole department")
+                .sort({ name: 1 }).limit(CANDIDATE_LIMIT).lean(),
+            Manager.find(filter).select("name email jobRole department")
+                .sort({ name: 1 }).limit(CANDIDATE_LIMIT).lean(),
+        ]);
+        const items = [
+            ...employees.map((e) => ({ ...e, personType: "Employee" })),
+            ...managers.map((m) => ({ ...m, personType: "Manager" })),
+        ]
+            .sort((a, b) =>
+                String(a.name || a.email).localeCompare(String(b.name || b.email)))
+            .slice(0, CANDIDATE_LIMIT);
+        return res.json({ items, total: items.length, limit: CANDIDATE_LIMIT });
     } catch (err) {
-        console.error("updateAccountant error:", err.message);
+        console.error("listAccountantCandidates error:", err.message);
         return res.status(500).json({ message: err.message });
     }
 };
 
-// POST /api/payroll/accountant/login
-const loginAccountant = async (req, res) => {
+const assignAccountant = async (req, res) => {
     try {
-        const email = String(req.body?.email || "").trim().toLowerCase();
-        const password = String(req.body?.password || "");
-        // One message for both wrong-email and wrong-password, so the form
-        // cannot be used to find out who has an account.
-        const invalid = () => res.status(400).json({ message: "Invalid credentials" });
+        // `personType` defaults to Employee, which is both the common case and
+        // what the field meant before managers could be assigned.
+        const personType = normaliseType(req.body?.personType || "employee");
+        if (!personType) {
+            return res.status(400).json({ message: "personType must be employee or manager" });
+        }
+        const personId = String(req.body?.personId || req.body?.employeeId || "");
+        if (!mongoose.Types.ObjectId.isValid(personId)) {
+            return res.status(400).json({ message: "A valid person is required" });
+        }
 
-        if (!email || !password) return invalid();
-        const accountant = await Accountant.findOne({ email });
-        if (!accountant || !accountant.isActive) return invalid();
-        if (!(await accountant.comparePassword(password))) return invalid();
+        const person = await modelFor(personType).findById(personId);
+        if (!person) return res.status(404).json({ message: `${personType} not found` });
+        if (person.canPreparePayroll) {
+            return res.status(409).json({
+                message: `${person.name || person.email} is already an accountant`,
+            });
+        }
 
-        const token = jwt.sign(
-            { id: accountant._id, kind: "accountant" },
-            process.env.JWT_SECRET,
-            { expiresIn: "12h" }
-        );
+        person.canPreparePayroll = true;
+        person.payrollAssignedAt = new Date();
+        person.payrollAssignedByName = actorName(req);
+        await person.save();
 
-        return res.json({
-            token,
-            name: accountant.name || accountant.email,
-            email: accountant.email,
+        return res.status(201).json({
+            _id: person._id,
+            personType,
+            name: person.name,
+            email: person.email,
+            phone: person.phone,
+            jobRole: person.jobRole,
+            department: person.department,
+            payrollAssignedAt: person.payrollAssignedAt,
+            payrollAssignedByName: person.payrollAssignedByName,
         });
     } catch (err) {
-        console.error("loginAccountant error:", err.message);
+        console.error("assignAccountant error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+/*
+  Un-assigning takes payroll away and nothing else: they keep their login,
+  their tasks and their own payslips, because they are still a member of
+  staff. Any run they prepared keeps their name on it — the audit trail stores
+  the name alongside the id for exactly this reason.
+*/
+const unassignAccountant = async (req, res) => {
+    try {
+        const personType = normaliseType(req.params.type);
+        if (!personType) {
+            return res.status(400).json({ message: "type must be employee or manager" });
+        }
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: "Invalid id" });
+        }
+        const person = await modelFor(personType).findById(id);
+        if (!person) return res.status(404).json({ message: `${personType} not found` });
+        if (!person.canPreparePayroll) {
+            return res.status(409).json({ message: "They are not an accountant" });
+        }
+
+        person.canPreparePayroll = false;
+        person.payrollAssignedAt = undefined;
+        person.payrollAssignedByName = undefined;
+        await person.save();
+
+        return res.json({
+            _id: person._id,
+            personType,
+            name: person.name,
+            email: person.email,
+            canPreparePayroll: false,
+        });
+    } catch (err) {
+        console.error("unassignAccountant error:", err.message);
         return res.status(500).json({ message: err.message });
     }
 };
@@ -334,8 +418,8 @@ module.exports = {
     listPolicies,
     createPolicy,
     updatePolicy,
-    createAccountant,
     listAccountants,
-    updateAccountant,
-    loginAccountant,
+    listAccountantCandidates,
+    assignAccountant,
+    unassignAccountant,
 };

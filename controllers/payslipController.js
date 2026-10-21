@@ -38,13 +38,7 @@ const Manager = require("../models/Manager");
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
-const actorFromReq = (req) => {
-    if (req.admin) return { userType: "Admin", userId: req.admin._id, name: req.admin.name || req.admin.email };
-    if (req.accountant) {
-        return { userType: "Accountant", userId: req.accountant._id, name: req.accountant.name || req.accountant.email };
-    }
-    return { userType: "System", name: "system" };
-};
+const { actorFromReq } = require("../utils/payrollActor");
 
 /** PS-YYYY-MM-#### — sequential within the month, so a run reads in order. */
 const nextPayslipNumber = async (month) => {
@@ -67,10 +61,10 @@ const releasePayslips = async (req, res) => {
 
         const run = await PayrollRun.findOne({ month });
         if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
-        if (run.status !== "locked") {
+        if (!["paid", "closed"].includes(run.status)) {
             return res.status(409).json({
                 message:
-                    "Payslips are only released from a locked run. A figure somebody can still change is not something to put in people's hands.",
+                    "Payslips go out once the salaries have actually been paid. A figure somebody can still change is not something to put in people's hands.",
             });
         }
 

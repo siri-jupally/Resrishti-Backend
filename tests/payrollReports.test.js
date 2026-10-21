@@ -81,7 +81,7 @@ beforeEach(async () => {
     await Promise.all([
         PayrollRun.deleteMany({}), PayrollLine.deleteMany({}), PayrollAudit.deleteMany({}),
     ]);
-    run = await PayrollRun.create({ month: MONTH, status: "locked" });
+    run = await PayrollRun.create({ month: MONTH, status: "closed" });
 });
 
 const register = async (month = MONTH) => {
@@ -209,7 +209,7 @@ describe("the CSV export", () => {
 describe("the trend", () => {
     test("only settled months appear", async () => {
         await makeLine();
-        const draft = await PayrollRun.create({ month: "2026-04", status: "review" });
+        const draft = await PayrollRun.create({ month: "2026-04", status: "pending-approval" });
         await makeLine({ run: draft._id, month: "2026-04" });
 
         const res = mockRes();
@@ -219,7 +219,7 @@ describe("the trend", () => {
 
     test("movement against the month before is worked out", async () => {
         await makeLine();
-        const april = await PayrollRun.create({ month: "2026-04", status: "locked" });
+        const april = await PayrollRun.create({ month: "2026-04", status: "closed" });
         await makeLine({ run: april._id, month: "2026-04", net: 33000, gross: 33000 });
 
         const res = mockRes();
@@ -244,9 +244,9 @@ describe("the trend", () => {
 describe("the audit log", () => {
     beforeEach(async () => {
         await PayrollAudit.create([
-            { action: "run.calculated", month: MONTH, actor: { userType: "Accountant", name: "Acc" } },
+            { action: "run.calculated", month: MONTH, actor: { userType: "Employee", name: "Acc" } },
             { action: "run.approved", month: MONTH, actor: { userType: "Admin", name: "Ada" } },
-            { action: "run.calculated", month: "2026-04", actor: { userType: "Accountant", name: "Acc" } },
+            { action: "run.calculated", month: "2026-04", actor: { userType: "Employee", name: "Acc" } },
         ]);
     });
 

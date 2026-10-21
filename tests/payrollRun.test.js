@@ -29,7 +29,6 @@ const Leave = require("../models/Leave");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
 const Admin = require("../models/Admin");
-const Accountant = require("../models/Accountant");
 
 const runs = require("../controllers/payrollRunController");
 const { seedPaidDayPolicies, getSettings } = require("../utils/payrollDefaults");
@@ -72,14 +71,19 @@ beforeEach(async () => {
         AttendanceMonthLock.deleteMany({}), AttendancePolicy.deleteMany({}),
         Attendance.deleteMany({}), Leave.deleteMany({}),
         Employee.deleteMany({}), Manager.deleteMany({}), Admin.deleteMany({}),
-        Accountant.deleteMany({}),
     ]);
 
     admin = await Admin.create({ email: "a@test.com", password: "secret123" });
-    accountant = await Accountant.create({ name: "Acc", email: "acc@test.com", password: "secret123" });
     manager = await Manager.create({ name: "Mgr", email: "m@test.com", password: "secret123" });
     employee = await Employee.create({
         name: "Emp", email: "e@test.com", password: "secret123", manager: manager._id,
+    });
+    // The accountant is an employee with the payroll tag, not a login of its
+    // own; the controllers see them as req.payrollEmployee. Employee.manager
+    // is required, so this comes after the manager exists.
+    accountant = await Employee.create({
+        name: "Acc", email: "acc@test.com", password: "secret123",
+        manager: manager._id, canPreparePayroll: true,
     });
 
     await AttendancePolicy.create({ weeklyOffDays: [0, 6], holidays: [] });
@@ -91,7 +95,7 @@ beforeEach(async () => {
 });
 
 const asAdmin = (o = {}) => mockReq({ admin, ...o });
-const asAccountant = (o = {}) => mockReq({ accountant, ...o });
+const asAccountant = (o = {}) => mockReq({ payrollEmployee: accountant, ...o });
 
 const closeAttendanceMonth = () =>
     AttendanceMonthLock.create({ month: MONTH, status: "locked", lockedAt: new Date() });
@@ -154,7 +158,7 @@ describe("the attendance lock gate", () => {
         await closeAttendanceMonth();
         const res = await calculate();
         expect(res.statusCode).toBe(200);
-        expect(res.body.run.status).toBe("review");
+        expect(res.body.run.status).toBe("draft");
         expect(res.body.lineCount).toBe(1);
     });
 });
@@ -290,13 +294,21 @@ describe("people who cannot be calculated", () => {
 
 // ──────────────────────────── the lifecycle ──────────────────────────────
 
-describe("approving and locking", () => {
+describe("the five-status lifecycle", () => {
     beforeEach(async () => {
         await tagForPayroll();
         await markFullMonth();
         await closeAttendanceMonth();
         await calculate();
+        // Generating leaves a draft; submitting is a separate, deliberate step.
+        await submit();
     });
+
+    const submit = async (req) => {
+        const res = mockRes();
+        await runs.submitRun(req || mockReq({ payrollEmployee: accountant, params: { month: MONTH } }), res);
+        return res;
+    };
 
     const approve = async (req) => {
         const res = mockRes();
@@ -312,36 +324,63 @@ describe("approving and locking", () => {
 
     test("the person who prepared it cannot approve it", async () => {
         // Recalculate as the admin, so they are the preparer.
-        await PayrollRun.updateOne({ month: MONTH }, { $set: { status: "review" } });
+        await PayrollRun.updateOne({ month: MONTH }, { $set: { status: "draft" } });
         const settings = await getSettings();
-        settings.approvalDepth = "single";
-        await settings.save();
-        await calculate(asAdmin({ params: { month: MONTH } }));
-
         settings.approvalDepth = "makerChecker";
         await settings.save();
+        // Recalculate and submit as the admin, so they are the preparer.
+        await calculate(asAdmin({ params: { month: MONTH } }));
+        await submit(asAdmin({ params: { month: MONTH } }));
 
         const res = await approve(asAdmin({ params: { month: MONTH } }));
         expect(res.statusCode).toBe(403);
         expect(res.body.message).toMatch(/somebody else/i);
     });
 
-    test("an approved run locks", async () => {
+    test("an approved run cannot be closed until it is paid", async () => {
         await approve(asAdmin({ params: { month: MONTH } }));
         const res = mockRes();
-        await runs.lockRun(asAdmin({ params: { month: MONTH } }), res);
-        expect(res.body.status).toBe("locked");
+        await runs.closeRun(asAdmin({ params: { month: MONTH } }), res);
+        expect(res.statusCode).toBe(409);
+        expect(res.body.message).toMatch(/record the payments first/i);
     });
 
-    test("a locked month cannot be recalculated, so it cannot be paid twice", async () => {
+    test("a submitted month cannot be recalculated, so it cannot be paid twice", async () => {
         await approve(asAdmin({ params: { month: MONTH } }));
-        await runs.lockRun(asAdmin({ params: { month: MONTH } }), mockRes());
         const res = await calculate();
         expect(res.statusCode).toBe(409);
-        expect(res.body.message).toMatch(/already been locked/i);
+        expect(res.body.message).toMatch(/before recalculating/i);
     });
 
-    test("reopening needs a reason and puts it back to review", async () => {
+    test("rejection needs a reason and sends it back to draft", async () => {
+        const noReason = mockRes();
+        await runs.rejectRun(asAdmin({ params: { month: MONTH }, body: {} }), noReason);
+        expect(noReason.statusCode).toBe(400);
+
+        const res = mockRes();
+        await runs.rejectRun(
+            asAdmin({ params: { month: MONTH }, body: { reason: "Overtime looks wrong for the yard crew" } }),
+            res
+        );
+        expect(res.body.status).toBe("draft");
+        expect(res.body.rejectionReason).toMatch(/yard crew/);
+    });
+
+    test("a rejected run can be corrected and resubmitted", async () => {
+        await runs.rejectRun(
+            asAdmin({ params: { month: MONTH }, body: { reason: "Please check the half-days" } }),
+            mockRes()
+        );
+        // Recalculating is allowed again now it is a draft, and it clears the
+        // rejection rather than leaving a stale reason on a fresh run.
+        const recalc = await calculate();
+        expect(recalc.statusCode).toBe(200);
+        const again = await submit();
+        expect(again.body.status).toBe("pending-approval");
+        expect(again.body.rejectionReason).toBeUndefined();
+    });
+
+    test("reopening needs a reason and puts it back to draft", async () => {
         await approve(asAdmin({ params: { month: MONTH } }));
         const noReason = mockRes();
         await runs.reopenRun(asAdmin({ params: { month: MONTH }, body: {} }), noReason);
@@ -352,13 +391,16 @@ describe("approving and locking", () => {
             asAdmin({ params: { month: MONTH }, body: { reason: "Late leave approval" } }),
             res
         );
-        expect(res.body.status).toBe("review");
+        expect(res.body.status).toBe("draft");
         expect(res.body.reopenReason).toBe("Late leave approval");
     });
 
-    test("locking is refused before approval", async () => {
-        const res = mockRes();
-        await runs.lockRun(asAdmin({ params: { month: MONTH } }), res);
+    test("approving is refused before submission", async () => {
+        await runs.rejectRun(
+            asAdmin({ params: { month: MONTH }, body: { reason: "back to draft please" } }),
+            mockRes()
+        );
+        const res = await approve(asAdmin({ params: { month: MONTH } }));
         expect(res.statusCode).toBe(409);
     });
 });
@@ -413,7 +455,105 @@ describe("adjustments", () => {
         expect(res.statusCode).toBe(400);
     });
 
+    test("a run with the approver cannot be adjusted", async () => {
+        // Submitting is enough — once it has left the preparer's hands the
+        // figures are what somebody is being asked to approve.
+        await runs.submitRun(mockReq({ payrollEmployee: accountant, params: { month: MONTH } }), mockRes());
+        const res = await adjust({ category: "bonus", amount: 100, reason: "Too late now" });
+        expect(res.statusCode).toBe(409);
+    });
+
+    /*
+      An accountant is an employee now, so they have a line of their own in the
+      run they prepare. These two cover the guard that stops them from paying
+      themselves a bonus, and confirm it does not get in anybody else's way.
+    */
+    describe("their own line", () => {
+        let ownLine;
+        beforeEach(async () => {
+            // The outer beforeEach has already closed the month, and the lock
+            // refuses attendance writes — correctly — so the accountant's own
+            // attendance goes in with the month briefly open, then the run is
+            // recalculated to pick up their line.
+            await tagForPayroll(accountant);
+            await withMonthOpen(() => markFullMonth(accountant));
+            await calculate(asAdmin({ params: { month: MONTH } }));
+            ownLine = await PayrollLine.findOne({ month: MONTH, personId: accountant._id });
+        });
+
+        const adjustOwn = async (req) => {
+            const res = mockRes();
+            await runs.adjustLine(
+                req({
+                    params: { month: MONTH, lineId: String(ownLine._id) },
+                    body: { category: "bonus", amount: 1000, reason: "A bonus for myself" },
+                }),
+                res
+            );
+            return res;
+        };
+
+        test("an accountant cannot adjust their own pay", async () => {
+            const res = await adjustOwn(asAccountant);
+            expect(res.statusCode).toBe(403);
+            const after = await PayrollLine.findById(ownLine._id);
+            expect(after.adjustments || 0).toBe(0);
+        });
+
+        test("but an admin can adjust it for them", async () => {
+            const res = await adjustOwn(asAdmin);
+            expect(res.statusCode).toBe(200);
+            expect(res.body.adjustments).toBe(1000);
+        });
+
+        // The guard reads whichever of the two staff branches the request
+        // came in on, so the manager case is worth its own test rather than
+        // assumed from the employee one.
+        test("a manager accountant cannot adjust their own pay either", async () => {
+            const ManagerAttendance = require("../models/ManagerAttendance");
+            await tagForPayroll(manager, "Manager");
+            await withMonthOpen(() =>
+                ManagerAttendance.insertMany(
+                    workingDates.map((date) => ({
+                        manager: manager._id, date, status: "present",
+                        workingHours: 8, approvalStatus: "auto-approved",
+                    }))
+                )
+            );
+            await calculate(asAdmin({ params: { month: MONTH } }));
+            const mgrLine = await PayrollLine.findOne({
+                month: MONTH, personType: "Manager", personId: manager._id,
+            });
+            expect(mgrLine).toBeTruthy();
+
+            const res = mockRes();
+            await runs.adjustLine(
+                mockReq({
+                    payrollManager: manager,
+                    params: { month: MONTH, lineId: String(mgrLine._id) },
+                    body: { category: "bonus", amount: 1000, reason: "A bonus for myself" },
+                }),
+                res
+            );
+            expect(res.statusCode).toBe(403);
+        });
+
+        test("and the accountant can still adjust everybody else", async () => {
+            const other = await PayrollLine.findOne({ month: MONTH, personId: employee._id });
+            const res = mockRes();
+            await runs.adjustLine(
+                asAccountant({
+                    params: { month: MONTH, lineId: String(other._id) },
+                    body: { category: "bonus", amount: 500, reason: "Worked the weekend" },
+                }),
+                res
+            );
+            expect(res.statusCode).toBe(200);
+        });
+    });
+
     test("an approved run cannot be adjusted without reopening", async () => {
+        await runs.submitRun(mockReq({ payrollEmployee: accountant, params: { month: MONTH } }), mockRes());
         await runs.approveRun(asAdmin({ params: { month: MONTH } }), mockRes());
         const res = await adjust({ category: "bonus", amount: 100, reason: "Too late now" });
         expect(res.statusCode).toBe(409);
@@ -428,15 +568,18 @@ describe("the audit log", () => {
         await markFullMonth();
         await closeAttendanceMonth();
         await calculate();
+        await runs.submitRun(mockReq({ payrollEmployee: accountant, params: { month: MONTH } }), mockRes());
         await runs.approveRun(asAdmin({ params: { month: MONTH } }), mockRes());
-        await runs.lockRun(asAdmin({ params: { month: MONTH } }), mockRes());
 
         const entries = await PayrollAudit.find({ month: MONTH }).sort({ createdAt: 1 }).lean();
         expect(entries.map((e) => e.action)).toEqual([
-            "run.calculated", "run.approved", "run.locked",
+            "run.calculated", "run.submitted", "run.approved",
         ]);
-        expect(entries[0].actor.userType).toBe("Accountant");
-        expect(entries[1].actor.userType).toBe("Admin");
+        // Recorded against the employee record, which is what still exists
+        // if the assignment is later revoked.
+        expect(entries[0].actor.userType).toBe("Employee");
+        expect(entries[1].actor.userType).toBe("Employee");
+        expect(entries[2].actor.userType).toBe("Admin");
     });
 
     test("a reopen keeps its reason in the log", async () => {
@@ -444,6 +587,7 @@ describe("the audit log", () => {
         await markFullMonth();
         await closeAttendanceMonth();
         await calculate();
+        await runs.submitRun(mockReq({ payrollEmployee: accountant, params: { month: MONTH } }), mockRes());
         await runs.approveRun(asAdmin({ params: { month: MONTH } }), mockRes());
         await runs.reopenRun(
             asAdmin({ params: { month: MONTH }, body: { reason: "Leave approved late" } }),

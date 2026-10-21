@@ -97,6 +97,15 @@ const readinessFor = async (month) => {
             .lean(),
     ]);
 
+    /*
+      Two more, from the month review: extra-pay days and leave days that
+      nobody has signed off. These are not undecided records — they are
+      correct figures that turn attendance into money, which is why they need
+      somebody's agreement rather than somebody's decision. Required lazily
+      because that module reads monthBounds from this one.
+    */
+    const { confirmationsOutstanding } = require("./attendanceLockSettlements");
+
     const blockers = [
         {
             key: "premisesApprovals",
@@ -119,7 +128,9 @@ const readinessFor = async (month) => {
             why: "Approving one writes leave days into this month, turning days currently counted as absent into leave.",
             where: "Leaves",
         },
-    ].filter((b) => b.count > 0);
+    ]
+        .filter((b) => b.count > 0)
+        .concat(await confirmationsOutstanding(month));
 
     const workedHours = records.reduce(
         (sum, r) => sum + (isCountedTowardHours(r) ? r.workingHours || 0 : 0),

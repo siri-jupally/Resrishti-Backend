@@ -242,7 +242,7 @@ app.use("/api/admin/pickups", require("./routes/adminPickupRoutes"));
 app.use("/api/admin/schedules", require("./routes/adminScheduleRoutes"));
 // Admin-editable waste stream list + CO2e factors.
 app.use("/api/admin/waste-categories", require("./routes/wasteCategoryRoutes"));
-// Payroll — profiles, settings, paid-day policies and accountant logins.
+// Payroll — profiles, settings, paid-day policies and who may prepare a run.
 app.use("/api/payroll", require("./routes/payrollRoutes"));
 
 // Operational KPIs for the admin dashboard.
