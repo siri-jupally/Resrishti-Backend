@@ -24,6 +24,7 @@ const PayrollSettings = require("../models/PayrollSettings");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
 const Admin = require("../models/Admin");
+const PayrollAudit = require("../models/PayrollAudit");
 
 const profiles = require("../controllers/payrollProfileController");
 const config = require("../controllers/payrollConfigController");
@@ -60,7 +61,7 @@ let employee;
 beforeEach(async () => {
     await Promise.all([
         PayrollProfile.deleteMany({}), PaidDayPolicy.deleteMany({}),
-        PayrollSettings.deleteMany({}),
+        PayrollSettings.deleteMany({}), PayrollAudit.deleteMany({}),
         Employee.deleteMany({}), Manager.deleteMany({}), Admin.deleteMany({}),
     ]);
     admin = await Admin.create({ email: "a@test.com", password: "secret123" });
@@ -156,6 +157,19 @@ describe("tagging somebody for payroll", () => {
         expect(res.body.payModel).toBe("monthly");
         expect(res.body.rates).toHaveLength(1);
         expect(res.body.rates[0].amount).toBe(30000);
+    });
+
+    test("the pay model cannot be switched once a profile has pay history", async () => {
+        await tag(monthlyBody());
+        // Switching monthly→daily would reinterpret ₹30,000/month as ₹30,000/day.
+        const res = await tag({
+            employmentType: "daily-wage",
+            payModel: "daily",
+            amount: 600,
+            effectiveFrom: "2026-02-01",
+        });
+        expect(res.statusCode).toBe(409);
+        expect(res.body.code).toBe("payModelLocked");
     });
 
     test("a daily-wage profile defaults to the work-only policy", async () => {
@@ -356,6 +370,14 @@ describe("rate history", () => {
 
     beforeEach(async () => {
         await tag(monthlyBody({ amount: 30000, effectiveFrom: "2026-01-01" }));
+    });
+
+    test("a rate change is written to the audit trail", async () => {
+        await addRate({ amount: 36000, effectiveFrom: "2026-06-01", reason: "Annual increment" });
+        const entry = await PayrollAudit.findOne({ action: "profile.rateAdded" }).lean();
+        expect(entry).toBeTruthy();
+        expect(entry.detail.amount).toBe(36000);
+        expect(entry.detail.effectiveFrom).toBe("2026-06-01");
     });
 
     test("a raise is added rather than overwriting the old rate", async () => {
@@ -692,6 +714,14 @@ describe("assigning an accountant", () => {
         return res;
     };
 
+    test("assigning and unassigning an accountant are both audited", async () => {
+        await assign(employee._id);
+        await unassign(employee._id);
+        const actions = (await PayrollAudit.find({}).lean()).map((a) => a.action);
+        expect(actions).toContain("accountant.assigned");
+        expect(actions).toContain("accountant.unassigned");
+    });
+
     test("an admin assigns an employee, and no password is involved", async () => {
         const res = await assign(employee._id);
         expect(res.statusCode).toBe(201);
@@ -879,6 +909,34 @@ describe("paid-day policies", () => {
 // ──────────────────────────── settings ────────────────────────────────────
 
 describe("settings", () => {
+    test("flipping approvalDepth off maker-checker is written to the audit trail", async () => {
+        const res = mockRes();
+        await config.updateSettings(asAdmin({ body: { approvalDepth: "single" } }), res);
+        expect(res.statusCode).toBe(200);
+        const entry = await PayrollAudit.findOne({ action: "settings.updated" }).lean();
+        expect(entry).toBeTruthy();
+        expect(entry.detail.approvalDepth).toEqual({ from: "makerChecker", to: "single" });
+    });
+
+    test("statutory deductions can be switched on with a rate", async () => {
+        const res = mockRes();
+        await config.updateSettings(asAdmin({
+            body: { statutory: { pf: { enabled: true, employeeRate: 12 }, pt: { enabled: true, amount: 200 } } },
+        }), res);
+        expect(res.statusCode).toBe(200);
+        expect(res.body.statutory.pf.enabled).toBe(true);
+        expect(res.body.statutory.pf.employeeRate).toBe(12);
+        expect(res.body.statutory.pt.enabled).toBe(true);
+        // ESI / TDS stay off — switching one on does not touch the others.
+        expect(res.body.statutory.esi.enabled).toBe(false);
+    });
+
+    test("a nonsense PF rate is refused", async () => {
+        const res = mockRes();
+        await config.updateSettings(asAdmin({ body: { statutory: { pf: { enabled: true, employeeRate: 500 } } } }), res);
+        expect(res.statusCode).toBe(400);
+    });
+
     test("the overtime rate is changed without touching code", async () => {
         const res = mockRes();
         await config.updateSettings(

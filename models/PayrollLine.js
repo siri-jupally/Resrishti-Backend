@@ -60,6 +60,15 @@ const payrollLineSchema = new mongoose.Schema(
         overtimePay: Number,
         gross: Number,
         deductions: { type: Number, default: 0 },
+        // Breakdown of `deductions` into the statutory components, for the
+        // payslip. Each is zero unless that component is switched on in settings.
+        statutory: {
+            pf: { type: Number, default: 0 },
+            esi: { type: Number, default: 0 },
+            pt: { type: Number, default: 0 },
+            tds: { type: Number, default: 0 },
+            _id: false,
+        },
         adjustments: { type: Number, default: 0 },
         net: Number,
 

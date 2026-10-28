@@ -29,9 +29,11 @@ const PayrollProfile = require("../models/PayrollProfile");
 const PaidDayPolicy = require("../models/PaidDayPolicy");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
+const JobRole = require("../models/JobRole");
 const { defaultPolicyFor, seedPaidDayPolicies } = require("../utils/payrollDefaults");
 const { notifyIfEnabled } = require("../utils/push");
 const { sendEmail } = require("../utils/emailService");
+const { writeAudit } = require("../utils/payrollAudit");
 
 const TYPES = ["Employee", "Manager"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -64,8 +66,8 @@ const listProfiles = async (req, res) => {
         await seedPaidDayPolicies();
 
         const [employees, managers, profiles] = await Promise.all([
-            Employee.find({}).select("name email jobRole department joiningDate manager bank bankUpdatedAt").lean(),
-            Manager.find({}).select("name email jobRole department joiningDate bank bankUpdatedAt").lean(),
+            Employee.find({}).select("name email jobRole jobRoleId department joiningDate manager bank bankUpdatedAt").lean(),
+            Manager.find({}).select("name email jobRole jobRoleId department joiningDate bank bankUpdatedAt").lean(),
             PayrollProfile.find({}).populate("paidDayPolicy", "name payWeeklyOff payHoliday").lean(),
         ]);
 
@@ -89,6 +91,7 @@ const listProfiles = async (req, res) => {
                 name: person.name || person.email,
                 email: person.email,
                 jobRole: person.jobRole || null,
+                jobRoleId: person.jobRoleId || null,
                 department: person.department || null,
                 joiningDate: person.joiningDate || null,
                 tagged: Boolean(profile),
@@ -269,6 +272,7 @@ const upsertProfile = async (req, res) => {
         }
 
         let profile = await PayrollProfile.findOne({ personType, personId: person._id });
+        const wasCreate = !profile;
 
         if (!profile) {
             const amount = Number(req.body.amount);
@@ -287,9 +291,16 @@ const upsertProfile = async (req, res) => {
                 });
             }
 
-            const policy = req.body.paidDayPolicy
-                ? await PaidDayPolicy.findById(req.body.paidDayPolicy)
-                : await defaultPolicyFor(payModel);
+            let policy;
+            if (req.body.paidDayPolicy) {
+                if (!mongoose.Types.ObjectId.isValid(req.body.paidDayPolicy)) {
+                    return res.status(400).json({ message: "Invalid paid-day policy" });
+                }
+                policy = await PaidDayPolicy.findById(req.body.paidDayPolicy);
+                if (!policy) return res.status(400).json({ message: "That paid-day policy does not exist" });
+            } else {
+                policy = await defaultPolicyFor(payModel);
+            }
 
             profile = new PayrollProfile({
                 personType,
@@ -307,6 +318,16 @@ const upsertProfile = async (req, res) => {
                 ],
             });
         } else {
+            // Changing the pay model reinterprets the entire rate history — a
+            // ₹30,000 MONTHLY salary would read as a ₹30,000 DAILY rate and pay
+            // roughly 30× on the next run — so it is refused once any rate
+            // exists. Create a new profile with fresh rates instead.
+            if (payModel !== profile.payModel && (profile.rates?.length || 0) > 0) {
+                return res.status(409).json({
+                    message: `This profile is on the ${profile.payModel} model with pay history, so it cannot switch to ${payModel} — every past rate would be reinterpreted. Create a new profile instead.`,
+                    code: "payModelLocked",
+                });
+            }
             profile.employmentType = employmentType;
             profile.payModel = payModel;
             if (req.body.paidDayPolicy !== undefined) {
@@ -351,6 +372,18 @@ const upsertProfile = async (req, res) => {
 
         profile.updatedByName = actorName(req);
         await profile.save();
+
+        await writeAudit({
+            action: wasCreate ? "profile.created" : "profile.updated",
+            req,
+            detail: {
+                personType,
+                personId: String(person._id),
+                name: person.name || person.email,
+                payModel: profile.payModel,
+                employmentType: profile.employmentType,
+            },
+        });
 
         const saved = await PayrollProfile.findById(profile._id).populate("paidDayPolicy").lean();
         return res.json(saved);
@@ -404,6 +437,19 @@ const addRate = async (req, res) => {
         profile.rates.push({ effectiveFrom, amount, reason, setByName: actorName(req) });
         profile.updatedByName = actorName(req);
         await profile.save();
+
+        await writeAudit({
+            action: "profile.rateAdded",
+            req,
+            detail: {
+                personType,
+                personId: String(person._id),
+                name: person.name || person.email,
+                amount,
+                effectiveFrom,
+                reason,
+            },
+        });
 
         return res.json({
             rates: [...profile.rates].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)),
@@ -497,6 +543,98 @@ const remindMissingBank = async (req, res) => {
     }
 };
 
+/*
+  POST /api/payroll/profiles/apply-role   { jobRoleId, rate?, effectiveFrom? }
+
+  "Add everyone in this role to payroll." Reads the role's payroll template and
+  creates a profile for each person who holds the role and is not already on
+  payroll, using the template + the role's default rate (or a rate passed for
+  this batch). People already tagged are left untouched — this never overwrites
+  an existing profile, so it is safe to run again. Approver-only, because it
+  sets pay.
+*/
+const applyRole = async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.body?.jobRoleId || "")) {
+            return res.status(400).json({ message: "A job role is required" });
+        }
+        const role = await JobRole.findById(req.body.jobRoleId);
+        if (!role) return res.status(404).json({ message: "Job role not found" });
+
+        const t = role.payroll;
+        if (!t?.employmentType || !t?.payModel) {
+            return res.status(400).json({
+                message: `"${role.name}" has no payroll template yet. Set it up in Payroll → Setup first.`,
+                code: "roleNotConfigured",
+            });
+        }
+
+        // The rate for this batch: an explicit one wins, else the role default.
+        // A profile cannot exist without a rate, so one must be available.
+        const explicit = req.body?.rate;
+        const rate = (explicit !== undefined && explicit !== null && String(explicit).trim() !== "")
+            ? Number(explicit)
+            : (typeof t.defaultRate === "number" ? t.defaultRate : null);
+        if (rate === null || !Number.isFinite(rate) || rate <= 0) {
+            return res.status(400).json({
+                message: "A pay rate is needed. Set a default rate on the role, or pass a rate for this batch.",
+                code: "rateRequired",
+            });
+        }
+        const effectiveFrom = DATE_RE.test(String(req.body?.effectiveFrom || ""))
+            ? req.body.effectiveFrom
+            : new Date().toISOString().slice(0, 10);
+
+        // Everybody who holds this role, within what the role applies to.
+        const [emps, mgrs] = await Promise.all([
+            role.appliesTo === "manager" ? [] : Employee.find({ jobRoleId: role._id }).select("name email").lean(),
+            role.appliesTo === "employee" ? [] : Manager.find({ jobRoleId: role._id }).select("name email").lean(),
+        ]);
+        const holders = [
+            ...emps.map((e) => ({ personType: "Employee", personId: e._id, name: e.name || e.email })),
+            ...mgrs.map((m) => ({ personType: "Manager", personId: m._id, name: m.name || m.email })),
+        ];
+        if (holders.length === 0) {
+            return res.status(400).json({ message: `Nobody holds the "${role.name}" role yet.` });
+        }
+
+        const existing = new Set(
+            (await PayrollProfile.find({ personId: { $in: holders.map((h) => h.personId) } })
+                .select("personType personId").lean())
+                .map((p) => `${p.personType}:${String(p.personId)}`)
+        );
+        const toCreate = holders.filter((h) => !existing.has(`${h.personType}:${String(h.personId)}`));
+
+        const docs = toCreate.map((h) => ({
+            personType: h.personType,
+            personId: h.personId,
+            employmentType: t.employmentType,
+            payModel: t.payModel,
+            paidDayPolicy: t.paidDayPolicy,
+            overtimeEligible: !!t.overtimeEligible,
+            rates: [{ effectiveFrom, amount: rate, reason: `Set from role: ${role.name}`, setByName: actorName(req) }],
+        }));
+        if (docs.length > 0) await PayrollProfile.insertMany(docs, { ordered: false });
+
+        await writeAudit({
+            action: "profile.bulkFromRole",
+            req,
+            detail: { role: role.name, created: docs.length, skipped: holders.length - docs.length, rate, effectiveFrom },
+        });
+
+        return res.status(201).json({
+            role: role.name,
+            created: docs.length,
+            skipped: holders.length - docs.length,
+            total: holders.length,
+            createdNames: toCreate.map((h) => h.name),
+        });
+    } catch (err) {
+        console.error("applyRole error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listProfiles,
     summary,
@@ -504,4 +642,5 @@ module.exports = {
     upsertProfile,
     addRate,
     remindMissingBank,
+    applyRole,
 };

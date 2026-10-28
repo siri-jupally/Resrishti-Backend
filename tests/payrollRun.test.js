@@ -337,6 +337,22 @@ describe("the five-status lifecycle", () => {
         expect(res.body.message).toMatch(/somebody else/i);
     });
 
+    test("the person who calculated it cannot approve it, even when someone else submitted", async () => {
+        // Admin calculates the figures; the accountant submits them. Under
+        // maker-checker the admin must still not approve — checking only the
+        // submitter used to let the calculator approve their own figures.
+        await PayrollRun.updateOne({ month: MONTH }, { $set: { status: "draft" } });
+        const settings = await getSettings();
+        settings.approvalDepth = "makerChecker";
+        await settings.save();
+        await calculate(asAdmin({ params: { month: MONTH } }));
+        await submit(); // the accountant submits
+
+        const res = await approve(asAdmin({ params: { month: MONTH } }));
+        expect(res.statusCode).toBe(403);
+        expect(res.body.sameActor).toBe(true);
+    });
+
     test("an approved run cannot be closed until it is paid", async () => {
         await approve(asAdmin({ params: { month: MONTH } }));
         const res = mockRes();
@@ -595,5 +611,110 @@ describe("the audit log", () => {
         );
         const entry = await PayrollAudit.findOne({ action: "run.reopened" });
         expect(entry.reason).toBe("Leave approved late");
+    });
+});
+
+// ──────────── reopening a paid month keeps its disbursement evidence ────────────
+
+describe("recalculating a reopened paid run preserves payment + payslip records", () => {
+    test("a reopened, already-paid run keeps each person's UTR, bank snapshot and released payslip through the recalculation", async () => {
+        await tagForPayroll();
+        await markFullMonth();
+        await closeAttendanceMonth();
+
+        // First calculation → a draft line for the employee.
+        await calculate();
+        const line = await PayrollLine.findOne({
+            month: MONTH, personType: "Employee", personId: employee._id,
+        });
+
+        // Simulate the month having gone all the way to paid, with the payslip
+        // released — this is the evidence a recalc used to destroy.
+        line.payment = {
+            status: "paid",
+            reference: "UTR-REALMONEY",
+            amount: line.net,
+            paidAt: new Date(),
+            bankSnapshot: { accountNumberLast4: "2100", ifsc: "HDFC0001234", bankName: "HDFC Bank" },
+            attempts: [{ status: "paid", reference: "UTR-REALMONEY" }],
+        };
+        line.payslip = {
+            number: "PS-1",
+            key: "payslips/2026-03/emp.pdf",
+            bucket: "bucket",
+            generatedAt: new Date(),
+            releasedAt: new Date(),
+        };
+        await line.save();
+        await PayrollRun.updateOne({ month: MONTH }, { $set: { status: "paid" } });
+
+        // An admin reopens the month with a reason, then it is recalculated.
+        const reopenRes = mockRes();
+        await runs.reopenRun(
+            asAdmin({ params: { month: MONTH }, body: { reason: "Correcting an allowance" } }),
+            reopenRes
+        );
+        expect(reopenRes.statusCode).toBe(200);
+
+        await calculate(); // the delete-and-rebuild that used to wipe the records
+
+        const after = await PayrollLine.findOne({
+            month: MONTH, personType: "Employee", personId: employee._id,
+        }).lean();
+
+        // The disbursement proof survives.
+        expect(after.payment.status).toBe("paid");
+        expect(after.payment.reference).toBe("UTR-REALMONEY");
+        expect(after.payment.bankSnapshot.accountNumberLast4).toBe("2100");
+        expect(after.payment.attempts.map((a) => a.reference)).toEqual(["UTR-REALMONEY"]);
+        // The released payslip survives (so the stored file is not orphaned).
+        expect(after.payslip.key).toBe("payslips/2026-03/emp.pdf");
+        expect(after.payslip.releasedAt).toBeTruthy();
+
+        // The recalculation records that it carried a paid line forward.
+        const calc = await PayrollAudit.findOne({ month: MONTH, action: "run.calculated" })
+            .sort({ createdAt: -1 })
+            .lean();
+        expect(calc.detail.carriedPayments).toBe(1);
+    });
+});
+
+// ─────────── a daily-wage profile with no paid-day policy is held out ───────────
+
+describe("a daily-wage profile with no paid-day policy", () => {
+    test("is named as an exception instead of being silently underpaid", async () => {
+        await tagForPayroll(employee, "Employee", {
+            payModel: "daily",
+            paidDayPolicy: undefined,
+            rates: [{ effectiveFrom: "2026-01-01", amount: 600 }],
+        });
+        await markFullMonth();
+        await closeAttendanceMonth();
+
+        const res = await calculate();
+        const codes = (res.body.exceptions || []).map((e) => e.code);
+        expect(codes).toContain("noPaidDayPolicy");
+    });
+});
+
+// ─────────── statutory deductions carry through onto the line ───────────
+
+describe("statutory deductions on a calculated line", () => {
+    test("once PF is switched on, the line carries the breakdown and net drops", async () => {
+        const settings = await getSettings();
+        settings.statutory = { pf: { enabled: true, employeeRate: 12, wageBasis: "gross", capToCeiling: false } };
+        await settings.save();
+
+        await tagForPayroll();      // monthly ₹30,000
+        await markFullMonth();
+        await closeAttendanceMonth();
+        await calculate();
+
+        const line = await PayrollLine.findOne({ month: MONTH, personType: "Employee", personId: employee._id }).lean();
+        expect(line.gross).toBe(30000);
+        expect(line.statutory.pf).toBe(3600);   // 12% of 30000
+        expect(line.statutory.esi).toBe(0);
+        expect(line.deductions).toBe(3600);
+        expect(line.net).toBe(26400);           // gross − deductions
     });
 });

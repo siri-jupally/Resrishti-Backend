@@ -270,6 +270,9 @@ describe("a salaried person", () => {
         // They are paid for their part of the month, not docked for all of it.
         expect(line.net).toBeGreaterThan(0);
         expect(line.net).toBeLessThan(30000);
+        // The paid day-count reconciles with the money (~15 days × 1000 ≈ 15000),
+        // not the old "1" that double-subtracted the pre-join days.
+        expect(line.payableDays).toBe(15);
         expect(line.exceptions.map((e) => e.code)).toContain("partialMonth");
     });
 

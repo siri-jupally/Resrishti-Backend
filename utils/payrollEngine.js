@@ -25,6 +25,49 @@ const { isCountedTowardHours } = require("./attendanceCounting");
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+/*
+  Employee statutory deductions (PF / ESI / Professional Tax / TDS). Each is off
+  unless switched on in settings, so with none enabled this returns zero and net
+  stays equal to gross — the behaviour before this existed. These are the
+  deductions that come off take-home; employer contributions are a cost, not a
+  deduction, and are not computed here.
+*/
+const computeStatutory = (gross, settings) => {
+    const s = settings?.statutory || {};
+    const out = { pf: 0, esi: 0, pt: 0, tds: 0 };
+    if (!(gross > 0)) return { ...out, total: 0 };
+
+    // PF — a percent of a wage base (whole gross, or a "basic" taken as a
+    // percent of gross), optionally capped at the statutory ceiling.
+    if (s.pf?.enabled) {
+        let base = s.pf.wageBasis === "gross"
+            ? gross
+            : round2(gross * ((Number(s.pf.basicPercent) || 0) / 100));
+        if (s.pf.capToCeiling && Number(s.pf.wageCeiling) > 0) {
+            base = Math.min(base, Number(s.pf.wageCeiling));
+        }
+        out.pf = round2(base * ((Number(s.pf.employeeRate) || 0) / 100));
+    }
+
+    // ESI — a small percent of gross, only at or below the gross ceiling.
+    if (s.esi?.enabled && gross <= (Number(s.esi.grossCeiling) || 0)) {
+        out.esi = round2(gross * ((Number(s.esi.employeeRate) || 0) / 100));
+    }
+
+    // Professional Tax — a flat monthly amount above a gross threshold.
+    if (s.pt?.enabled && gross >= (Number(s.pt.minGross) || 0)) {
+        out.pt = round2(Number(s.pt.amount) || 0);
+    }
+
+    // TDS — a flat percent of gross for now.
+    if (s.tds?.enabled) {
+        out.tds = round2(gross * ((Number(s.tds.flatPercent) || 0) / 100));
+    }
+
+    out.total = round2(out.pf + out.esi + out.pt + out.tds);
+    return out;
+};
+
 // Attendance statuses that mean the person worked.
 const WORKED = new Set(["present", "half-day"]);
 
@@ -226,7 +269,12 @@ const computeLine = ({
         if (notOnPayroll > 0) lopDays = round2(lopDays + notOnPayroll);
 
         basePay = round2(rate.amount - perDayRate * lopDays);
-        payableDays = round2(days.length - lopDays);
+        // Paid day-equivalents = the full-month basis minus the days lost. This
+        // reconciles with the money (basePay ≈ perDayRate × payableDays). The
+        // old `days.length - lopDays` double-subtracted the not-on-payroll days
+        // (they are already excluded from days.length AND added into lopDays),
+        // so a mid-month joiner reported 1 paid day while being paid ~15.
+        payableDays = round2(divisor - lopDays);
     } else {
         // Start from nothing; add up what was paid.
         perDayRate = round2(rate.amount);
@@ -257,6 +305,7 @@ const computeLine = ({
     }
 
     gross = round2(basePay + overtimePay);
+    const statutory = computeStatutory(gross, settings);
 
     return {
         payModel: profile.payModel,
@@ -271,11 +320,12 @@ const computeLine = ({
         overtimeDays: round2(tally.overtimeDays),
         overtimePay,
         gross,
-        deductions: 0,
+        statutory,
+        deductions: statutory.total,
         adjustments: 0,
-        net: gross,
+        net: round2(gross - statutory.total),
         exceptions,
     };
 };
 
-module.exports = { classifyDay, computeLine, round2, WORKED };
+module.exports = { classifyDay, computeLine, computeStatutory, round2, WORKED };

@@ -33,6 +33,12 @@ const reports = require("../controllers/payrollReportController");
 router.get("/settings", protectPayroll, config.readSettings);
 router.put("/settings", protectApprover, config.updateSettings);
 
+// ---- role-based payroll defaults ------------------------------------------
+// Reads feed the Setup screen and the tagging pre-fill; setting a role's
+// template decides pay, so it sits behind the approver gate.
+router.get("/roles", protectPayroll, config.listRoles);
+router.put("/roles/:id/defaults", protectApprover, config.setRoleDefaults);
+
 // ---- paid-day policies ----------------------------------------------------
 router.get("/paid-day-policies", protectPayroll, config.listPolicies);
 router.post("/paid-day-policies", protectApprover, config.createPolicy);
@@ -50,6 +56,9 @@ router.delete("/accountants/:type/:id", protectApprover, config.unassignAccounta
 // Literal paths before /:type/:id so they are not read as a person.
 router.get("/profiles/summary", protectPayroll, profiles.summary);
 router.get("/profiles", protectPayroll, profiles.listProfiles);
+// Literal path, before the /:type/:id routes. Bulk-create profiles for everyone
+// in a role from that role's payroll template. Approver-only (it sets pay).
+router.post("/profiles/apply-role", protectApprover, profiles.applyRole);
 router.get("/profiles/:type/:id", protectPayroll, profiles.getProfile);
 router.put("/profiles/:type/:id", protectApprover, profiles.upsertProfile);
 router.post("/profiles/:type/:id/rates", protectApprover, profiles.addRate);

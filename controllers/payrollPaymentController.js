@@ -234,6 +234,15 @@ const recordPayments = async (req, res) => {
             // with no bank account are refused rather than marked paid — the
             // money cannot have reached an account that does not exist.
             const reference = String(req.body.reference || "").trim();
+            // A bulk "mark everyone paid" shares one reference. A blank one would
+            // record the whole month paid with no bank evidence to reconcile
+            // against — the classic "we paid them, trust me".
+            if (!reference) {
+                return res.status(400).json({
+                    message: "Enter the bank reference (UTR) for the transfer before marking everyone paid.",
+                    code: "referenceRequired",
+                });
+            }
             const missing = lines.filter(
                 (l) => l.payment?.status !== "paid" && !banks.get(String(l.personId))?.bank?.accountNumber
             );
@@ -276,6 +285,16 @@ const recordPayments = async (req, res) => {
                 });
                 continue;
             }
+            // A payment recorded as paid with no reference is a payment with no
+            // proof it happened. Require the UTR the bank returned.
+            if (o.status === "paid" && !String(o.reference || "").trim()) {
+                problems.push({
+                    lineId: o.lineId,
+                    name: line.personName,
+                    message: "A bank reference (UTR) is required to mark a payment as paid.",
+                });
+                continue;
+            }
             applyOutcome(line, {
                 status: o.status,
                 reference: o.reference,
@@ -301,6 +320,14 @@ const recordPayments = async (req, res) => {
             run.status = "paid";
             run.paidAt = new Date();
             run.paidBy = actor;
+        } else if (!settled && run.status === "paid") {
+            // A line that was paid has gone back to failed/pending, so the month
+            // is no longer fully paid — drop it back to approved rather than
+            // leaving a "Paid" month with an unpaid person. (A closed month can't
+            // reach here: recordPayments refuses a closed run.)
+            run.status = "approved";
+            run.paidAt = undefined;
+            run.paidBy = undefined;
         }
         await run.save();
 

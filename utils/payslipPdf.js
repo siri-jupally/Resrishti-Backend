@@ -285,7 +285,19 @@ const MoneyTable = ({ line }) => {
         ]);
     }
 
-    if (line.deductions) {
+    // Statutory deductions, itemised so the payslip shows what each component
+    // took. Falls back to a single "Deductions" line for a line that carries a
+    // deduction total but no per-component breakdown.
+    const st = line.statutory || {};
+    const statRows = [
+        ["Provident Fund (PF)", st.pf],
+        ["Employee State Insurance (ESI)", st.esi],
+        ["Professional Tax", st.pt],
+        ["TDS", st.tds],
+    ].filter(([, v]) => Number(v) > 0);
+    if (statRows.length > 0) {
+        for (const [label, v] of statRows) rows.push([label, "", -Math.abs(Number(v))]);
+    } else if (line.deductions) {
         rows.push(["Deductions", "", -Math.abs(line.deductions)]);
     }
 

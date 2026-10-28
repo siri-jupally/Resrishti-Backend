@@ -45,6 +45,30 @@ const jobRoleSchema = new mongoose.Schema(
         // Retired roles stay on the people who hold them, but cannot be newly
         // assigned. Deleting outright would silently change those people's access.
         isActive: { type: Boolean, default: true },
+
+        /*
+          Optional payroll template. When set, tagging somebody who holds this
+          role pre-fills their pay profile from here, and "add everyone in this
+          role" can create profiles in bulk. The role is considered configured
+          for payroll only when employmentType AND payModel are both set.
+
+          Setting this is an approver action — it decides pay — so it is written
+          from Payroll → Setup (protectApprover), not from the attendance role
+          editor. Changing it only affects profiles created afterwards: existing
+          profiles and payslips keep their own snapshot, so nobody's past pay
+          moves because a role default changed.
+        */
+        payroll: {
+            employmentType: { type: String, enum: ["permanent", "contract", "daily-wage"] },
+            payModel: { type: String, enum: ["monthly", "daily"] },
+            paidDayPolicy: { type: mongoose.Schema.Types.ObjectId, ref: "PaidDayPolicy" },
+            overtimeEligible: { type: Boolean, default: false },
+            // Optional. Blank / null → the rate is entered per person.
+            defaultRate: { type: Number, min: 0 },
+            setByName: { type: String, trim: true },
+            updatedAt: { type: Date },
+            _id: false,
+        },
     },
     { timestamps: true }
 );
