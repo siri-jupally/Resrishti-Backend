@@ -190,6 +190,25 @@ describe("the bank file", () => {
 // ───────────────────────── recording what the bank did ─────────────────────────
 
 describe("recording payments", () => {
+    test("mark-all-paid is refused with no bank reference", async () => {
+        await seedRun({ withBank: 2, withoutBank: 0 });
+        const res = await record({ markAllPaid: true }); // no reference
+        expect(res.statusCode).toBe(400);
+        expect(res.body.code).toBe("referenceRequired");
+        const paid = await PayrollLine.countDocuments({ run: run._id, "payment.status": "paid" });
+        expect(paid).toBe(0);
+    });
+
+    test("a per-line paid outcome with no reference is rejected, not recorded", async () => {
+        await seedRun({ withBank: 1, withoutBank: 0 });
+        const res = await record({
+            outcomes: [{ lineId: String(people[0].line._id), status: "paid" }],
+        });
+        expect(res.statusCode).toBe(400);
+        const line = await PayrollLine.findById(people[0].line._id).lean();
+        expect(line.payment.status).toBe("pending");
+    });
+
     test("marking everyone paid settles the run", async () => {
         await seedRun({ withBank: 3, withoutBank: 0 });
         const res = await record({ markAllPaid: true, reference: "BULK-001" });
@@ -296,6 +315,17 @@ describe("recording payments", () => {
         });
         expect(res.statusCode).toBe(200);
         expect(res.body.problems).toHaveLength(1);
+    });
+
+    test("a settled month drops back to approved if a line is later marked failed", async () => {
+        await seedRun({ withBank: 2, withoutBank: 0 });
+        await record({ markAllPaid: true, reference: "BULK" });
+        expect((await PayrollRun.findOne({ month: MONTH })).status).toBe("paid");
+
+        const res = await record({
+            outcomes: [{ lineId: String(people[0].line._id), status: "failed", failureReason: "Reversed by bank" }],
+        });
+        expect(res.body.run.status).toBe("approved");
     });
 
     test("the run reaching paid is in the audit log", async () => {

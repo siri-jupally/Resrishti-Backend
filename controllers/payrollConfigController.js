@@ -26,7 +26,9 @@ const PaidDayPolicy = require("../models/PaidDayPolicy");
 const PayrollProfile = require("../models/PayrollProfile");
 const Employee = require("../models/Employee");
 const Manager = require("../models/Manager");
+const JobRole = require("../models/JobRole");
 const { getSettings, seedPaidDayPolicies } = require("../utils/payrollDefaults");
+const { writeAudit } = require("../utils/payrollAudit");
 
 /*
   Staff come in two collections, and the payroll module already names that
@@ -71,6 +73,7 @@ const updateSettings = async (req, res) => {
     try {
         const settings = await getSettings();
         const body = req.body || {};
+        const approvalDepthBefore = settings.approvalDepth;
 
         if (body.perDayRateBasis !== undefined) {
             if (!["fixed30", "calendarDays", "workingDays"].includes(body.perDayRateBasis)) {
@@ -145,8 +148,67 @@ const updateSettings = async (req, res) => {
             settings.showBankOnPayslip = body.showBankOnPayslip === true || body.showBankOnPayslip === "true";
         }
 
+        // ---- statutory deductions (PF / ESI / PT / TDS) -------------------
+        // Each component is toggled and tuned independently. Merge onto the
+        // current values (filling defaults for a settings doc that predates the
+        // field), validate, and set the whole subtree back.
+        if (body.statutory && typeof body.statutory === "object") {
+            const cur = settings.statutory?.toObject ? settings.statutory.toObject() : (settings.statutory || {});
+            const next = {
+                pf: { enabled: false, employeeRate: 12, wageBasis: "basic", basicPercent: 50, wageCeiling: 15000, capToCeiling: true, ...(cur.pf || {}) },
+                esi: { enabled: false, employeeRate: 0.75, grossCeiling: 21000, ...(cur.esi || {}) },
+                pt: { enabled: false, amount: 200, minGross: 15000, ...(cur.pt || {}) },
+                tds: { enabled: false, flatPercent: 0, ...(cur.tds || {}) },
+            };
+            const st = body.statutory;
+            const bool = (v) => v === true || v === "true";
+            const pct = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 && n <= 100 ? n : NaN; };
+            const nonneg = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : NaN; };
+
+            if (st.pf) {
+                if (st.pf.enabled !== undefined) next.pf.enabled = bool(st.pf.enabled);
+                if (st.pf.wageBasis !== undefined) {
+                    if (!["basic", "gross"].includes(st.pf.wageBasis)) return res.status(400).json({ message: "PF wage basis must be basic or gross" });
+                    next.pf.wageBasis = st.pf.wageBasis;
+                }
+                if (st.pf.capToCeiling !== undefined) next.pf.capToCeiling = bool(st.pf.capToCeiling);
+                for (const [k, f, label] of [["employeeRate", pct, "PF rate must be 0–100%"], ["basicPercent", pct, "PF basic percent must be 0–100"], ["wageCeiling", nonneg, "PF wage ceiling must be zero or more"]]) {
+                    if (st.pf[k] !== undefined) { const n = f(st.pf[k]); if (Number.isNaN(n)) return res.status(400).json({ message: label }); next.pf[k] = n; }
+                }
+            }
+            if (st.esi) {
+                if (st.esi.enabled !== undefined) next.esi.enabled = bool(st.esi.enabled);
+                if (st.esi.employeeRate !== undefined) { const n = pct(st.esi.employeeRate); if (Number.isNaN(n)) return res.status(400).json({ message: "ESI rate must be 0–100%" }); next.esi.employeeRate = n; }
+                if (st.esi.grossCeiling !== undefined) { const n = nonneg(st.esi.grossCeiling); if (Number.isNaN(n)) return res.status(400).json({ message: "ESI gross ceiling must be zero or more" }); next.esi.grossCeiling = n; }
+            }
+            if (st.pt) {
+                if (st.pt.enabled !== undefined) next.pt.enabled = bool(st.pt.enabled);
+                if (st.pt.amount !== undefined) { const n = nonneg(st.pt.amount); if (Number.isNaN(n)) return res.status(400).json({ message: "PT amount must be zero or more" }); next.pt.amount = n; }
+                if (st.pt.minGross !== undefined) { const n = nonneg(st.pt.minGross); if (Number.isNaN(n)) return res.status(400).json({ message: "PT threshold must be zero or more" }); next.pt.minGross = n; }
+            }
+            if (st.tds) {
+                if (st.tds.enabled !== undefined) next.tds.enabled = bool(st.tds.enabled);
+                if (st.tds.flatPercent !== undefined) { const n = pct(st.tds.flatPercent); if (Number.isNaN(n)) return res.status(400).json({ message: "TDS percent must be 0–100" }); next.tds.flatPercent = n; }
+            }
+            settings.set("statutory", next);
+        }
+
         settings.updatedByName = actorName(req);
         await settings.save();
+
+        // The most sensitive setting is approvalDepth — flipping it off
+        // makerChecker lets one person prepare and approve. Record every
+        // settings change, and the before/after of that flag in particular.
+        await writeAudit({
+            action: "settings.updated",
+            req,
+            detail: {
+                changed: Object.keys(body),
+                ...(approvalDepthBefore !== settings.approvalDepth
+                    ? { approvalDepth: { from: approvalDepthBefore, to: settings.approvalDepth } }
+                    : {}),
+            },
+        });
         return res.json(settings);
     } catch (err) {
         console.error("updateSettings error:", err.message);
@@ -355,6 +417,12 @@ const assignAccountant = async (req, res) => {
         person.payrollAssignedByName = actorName(req);
         await person.save();
 
+        await writeAudit({
+            action: "accountant.assigned",
+            req,
+            detail: { personType, personId: String(person._id), name: person.name || person.email },
+        });
+
         return res.status(201).json({
             _id: person._id,
             personType,
@@ -399,6 +467,12 @@ const unassignAccountant = async (req, res) => {
         person.payrollAssignedByName = undefined;
         await person.save();
 
+        await writeAudit({
+            action: "accountant.unassigned",
+            req,
+            detail: { personType, personId: String(person._id), name: person.name || person.email },
+        });
+
         return res.json({
             _id: person._id,
             personType,
@@ -408,6 +482,124 @@ const unassignAccountant = async (req, res) => {
         });
     } catch (err) {
         console.error("unassignAccountant error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// ── role-based payroll defaults ─────────────────────────────────────────────
+
+/*
+  Every active role, with its payroll template and how many of its holders are
+  already on payroll — the data the Setup "role defaults" screen and the
+  profile-tagging pre-fill both read.
+*/
+const listRoles = async (req, res) => {
+    try {
+        const roles = await JobRole.find({ isActive: true })
+            .sort({ name: 1 })
+            .populate("payroll.paidDayPolicy", "name")
+            .lean();
+
+        const [emps, mgrs, profiles] = await Promise.all([
+            Employee.find({ jobRoleId: { $ne: null } }).select("jobRoleId").lean(),
+            Manager.find({ jobRoleId: { $ne: null } }).select("jobRoleId").lean(),
+            PayrollProfile.find({}).select("personType personId").lean(),
+        ]);
+        const onPayroll = new Set(profiles.map((p) => `${p.personType}:${String(p.personId)}`));
+
+        const tally = {};
+        const add = (roleId, type, id) => {
+            const k = String(roleId);
+            (tally[k] = tally[k] || { people: 0, onPayroll: 0 }).people += 1;
+            if (onPayroll.has(`${type}:${String(id)}`)) tally[k].onPayroll += 1;
+        };
+        emps.forEach((e) => add(e.jobRoleId, "Employee", e._id));
+        mgrs.forEach((m) => add(m.jobRoleId, "Manager", m._id));
+
+        return res.json({
+            items: roles.map((r) => ({
+                _id: r._id,
+                name: r.name,
+                appliesTo: r.appliesTo,
+                payroll: r.payroll || null,
+                configured: Boolean(r.payroll?.employmentType && r.payroll?.payModel),
+                people: tally[String(r._id)]?.people || 0,
+                onPayroll: tally[String(r._id)]?.onPayroll || 0,
+            })),
+        });
+    } catch (err) {
+        console.error("listRoles error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+/*
+  PUT /api/payroll/roles/:id/defaults
+  Set (or clear, with { clear: true }) a role's payroll template. Approver-only
+  — it decides pay. Only affects profiles created afterwards.
+*/
+const setRoleDefaults = async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid job role" });
+        }
+        const role = await JobRole.findById(req.params.id);
+        if (!role) return res.status(404).json({ message: "Job role not found" });
+
+        const b = req.body || {};
+
+        if (b.clear === true) {
+            role.payroll = undefined;
+            await role.save();
+            await writeAudit({ action: "role.payrollCleared", req, detail: { role: role.name } });
+            return res.json({ _id: role._id, name: role.name, payroll: null, configured: false });
+        }
+
+        if (!["permanent", "contract", "daily-wage"].includes(b.employmentType)) {
+            return res.status(400).json({ message: "employmentType must be permanent, contract or daily-wage" });
+        }
+        if (!["monthly", "daily"].includes(b.payModel)) {
+            return res.status(400).json({ message: "payModel must be monthly or daily" });
+        }
+        let policyId;
+        if (b.paidDayPolicy) {
+            if (!mongoose.Types.ObjectId.isValid(b.paidDayPolicy)) {
+                return res.status(400).json({ message: "Invalid paid-day policy" });
+            }
+            const policy = await PaidDayPolicy.findById(b.paidDayPolicy);
+            if (!policy) return res.status(400).json({ message: "That paid-day policy does not exist" });
+            policyId = policy._id;
+        }
+        let defaultRate;
+        if (b.defaultRate !== undefined && b.defaultRate !== null && String(b.defaultRate).trim() !== "") {
+            const n = Number(b.defaultRate);
+            if (!Number.isFinite(n) || n < 0) {
+                return res.status(400).json({ message: "defaultRate must be zero or more, or left blank" });
+            }
+            defaultRate = n;
+        }
+
+        role.payroll = {
+            employmentType: b.employmentType,
+            payModel: b.payModel,
+            paidDayPolicy: policyId,
+            overtimeEligible: b.overtimeEligible === true || b.overtimeEligible === "true",
+            defaultRate,
+            setByName: actorName(req),
+            updatedAt: new Date(),
+        };
+        await role.save();
+
+        await writeAudit({
+            action: "role.payrollSet",
+            req,
+            detail: { role: role.name, employmentType: b.employmentType, payModel: b.payModel, defaultRate: defaultRate ?? null },
+        });
+
+        const saved = await JobRole.findById(role._id).populate("payroll.paidDayPolicy", "name").lean();
+        return res.json({ _id: role._id, name: role.name, payroll: saved.payroll, configured: true });
+    } catch (err) {
+        console.error("setRoleDefaults error:", err.message);
         return res.status(500).json({ message: err.message });
     }
 };
@@ -422,4 +614,6 @@ module.exports = {
     listAccountantCandidates,
     assignAccountant,
     unassignAccountant,
+    listRoles,
+    setRoleDefaults,
 };

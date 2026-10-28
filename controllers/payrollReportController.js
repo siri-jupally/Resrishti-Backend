@@ -220,7 +220,10 @@ const getAuditLog = async (req, res) => {
         // The distinct actions present, so the filter offers only what exists.
         const actions = await PayrollAudit.distinct("action");
 
-        return res.json({ items: entries, total: entries.length, actions: actions.sort() });
+        // The true match count, not the page size — a capped page would
+        // otherwise under-report how much is in the log.
+        const matched = await PayrollAudit.countDocuments(filter);
+        return res.json({ items: entries, total: matched, shown: entries.length, actions: actions.sort() });
     } catch (err) {
         console.error("getAuditLog error:", err.message);
         return res.status(500).json({ message: err.message });

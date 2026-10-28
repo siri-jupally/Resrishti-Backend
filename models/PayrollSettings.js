@@ -86,6 +86,52 @@ const payrollSettingsSchema = new mongoose.Schema(
             default: ["bonus", "incentive", "advance-recovery", "fine", "correction", "other"],
         },
 
+        // ---- statutory deductions ----------------------------------------
+        // PF / ESI / Professional Tax / TDS. Each is switched on independently;
+        // all default OFF, so turning none on leaves net = gross — the behaviour
+        // before this existed. Rates and thresholds are settings because they
+        // change with the law and the company's status. These are the EMPLOYEE
+        // deductions that come off take-home; employer contributions are a cost,
+        // not a deduction, and are not modelled here.
+        statutory: {
+            // Provident Fund — a percent of a wage base, optionally capped at
+            // the statutory ceiling (₹15,000 basic).
+            pf: {
+                enabled: { type: Boolean, default: false },
+                employeeRate: { type: Number, default: 12, min: 0, max: 100 },
+                // Whole gross, or a "basic" taken as a percent of gross.
+                wageBasis: { type: String, enum: ["basic", "gross"], default: "basic" },
+                basicPercent: { type: Number, default: 50, min: 0, max: 100 },
+                wageCeiling: { type: Number, default: 15000, min: 0 },
+                capToCeiling: { type: Boolean, default: true },
+                _id: false,
+            },
+            // Employee State Insurance — a small percent of gross, only for
+            // people earning at or below the gross ceiling.
+            esi: {
+                enabled: { type: Boolean, default: false },
+                employeeRate: { type: Number, default: 0.75, min: 0, max: 100 },
+                grossCeiling: { type: Number, default: 21000, min: 0 },
+                _id: false,
+            },
+            // Professional Tax — a state levy. A flat monthly amount above a
+            // gross threshold; full state slabs are a later refinement.
+            pt: {
+                enabled: { type: Boolean, default: false },
+                amount: { type: Number, default: 200, min: 0 },
+                minGross: { type: Number, default: 15000, min: 0 },
+                _id: false,
+            },
+            // TDS — income tax at source. A flat percent of gross for now; a
+            // per-person / regime-aware calculation is a later refinement.
+            tds: {
+                enabled: { type: Boolean, default: false },
+                flatPercent: { type: Number, default: 0, min: 0, max: 100 },
+                _id: false,
+            },
+            _id: false,
+        },
+
         // ---- payslip ------------------------------------------------------
         payslipNote: { type: String, trim: true, maxlength: 500 },
         showBankOnPayslip: { type: Boolean, default: false },

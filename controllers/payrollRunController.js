@@ -215,6 +215,22 @@ const calculateRun = async (req, res) => {
                 continue;
             }
 
+            // A daily-wage profile with no paid-day policy would silently pay
+            // work-only (weekly-offs and holidays dropped), quietly underpaying
+            // a "regular" daily worker. Surface it instead of guessing.
+            if (
+                profile.payModel === "daily" &&
+                !policyById.get(String(profile.paidDayPolicy))
+            ) {
+                exceptions.push({
+                    personType, personId, name,
+                    code: "noPaidDayPolicy",
+                    message:
+                        "This daily-wage profile has no paid-day policy, so weekly-offs and holidays would go unpaid. Attach a policy before including them.",
+                });
+                continue;
+            }
+
             const line = computeLine({
                 profile,
                 rate,
@@ -274,6 +290,24 @@ const calculateRun = async (req, res) => {
         const previousLines = await PayrollLine.find({ month: previousMonth }).select("personId net").lean();
         const previousNetById = new Map(previousLines.map((l) => [String(l.personId), l.net]));
 
+        // Preserve the disbursement evidence across a recalculation. A run can be
+        // reopened after it was paid (reopenRun sends paid/closed back to draft),
+        // and the rebuild below deletes and re-inserts every line. Without
+        // carrying these two sub-documents forward, that rebuild would
+        // permanently erase each person's payment record (UTR / bank snapshot /
+        // paidAt / attempts) and their released payslip (key + releasedAt),
+        // orphaning the stored payslip file and destroying the only per-person
+        // proof that money left the building. Matched by (personType, personId).
+        const priorLines = await PayrollLine.find({ run: run._id })
+            .select("personType personId payment payslip")
+            .lean();
+        const priorByPerson = new Map(
+            priorLines.map((l) => [`${l.personType}:${String(l.personId)}`, l])
+        );
+        const carriedPayments = priorLines.filter(
+            (l) => l.payment && l.payment.status && l.payment.status !== "pending"
+        ).length;
+
         await PayrollLine.deleteMany({ run: run._id });
 
         const docs = computed.map(({ personType, personId, person, profile, policyName, line }) => {
@@ -282,6 +316,7 @@ const calculateRun = async (req, res) => {
                 previousNet && previousNet > 0
                     ? round2(((line.net - previousNet) / previousNet) * 100)
                     : null;
+            const prior = priorByPerson.get(`${personType}:${String(personId)}`);
             return {
                 run: run._id,
                 month,
@@ -296,6 +331,10 @@ const calculateRun = async (req, res) => {
                 previousNet: previousNet ?? null,
                 variancePercent,
                 ...line,
+                // Carried forward so a reopen+recalc never erases disbursement
+                // evidence or a released payslip (see the priorByPerson note above).
+                ...(prior?.payment ? { payment: prior.payment } : {}),
+                ...(prior?.payslip ? { payslip: prior.payslip } : {}),
             };
         });
         if (docs.length > 0) await PayrollLine.insertMany(docs);
@@ -320,7 +359,12 @@ const calculateRun = async (req, res) => {
             run,
             month,
             req,
-            detail: { people: totals.people, net: totals.net, exceptions: exceptions.length },
+            detail: {
+                people: totals.people,
+                net: totals.net,
+                exceptions: exceptions.length,
+                ...(carriedPayments > 0 ? { carriedPayments } : {}),
+            },
         });
 
         return res.json({ run, lineCount: docs.length, exceptions });
@@ -448,7 +492,7 @@ const blockersFor = async (run) => {
     if (negative.length > 0) {
         out.push({
             code: "negativeNet",
-            message: `${negative.length} ${negative.length === 1 ? "person has" : "people have"} a negative net. Adjust the deductions before submitting.`,
+            message: `${negative.length} ${negative.length === 1 ? "person has" : "people have"} a negative net. Add a correcting adjustment before submitting.`,
             people: negative.map((l) => ({ name: l.personName, net: l.net })),
         });
     }
@@ -557,8 +601,14 @@ const approveRun = async (req, res) => {
         // prepared it. Approving your own work is not a second pair of eyes.
         if (settings.approvalDepth === "makerChecker") {
             const actor = actorFromReq(req);
-            const preparer = run.submittedBy?.userId || run.calculatedBy?.userId;
-            if (preparer && String(preparer) === String(actor.userId)) {
+            // The approver must not be EITHER person who prepared the run — the
+            // one who calculated the figures or the one who submitted them.
+            // Checking only the submitter let admin A calculate, admin B submit,
+            // and admin A approve their own figures.
+            const preparers = [run.calculatedBy?.userId, run.submittedBy?.userId]
+                .filter(Boolean)
+                .map(String);
+            if (preparers.includes(String(actor.userId))) {
                 return res.status(403).json({
                     message:
                         "You prepared this run, so somebody else has to approve it. That is what maker–checker is for.",
