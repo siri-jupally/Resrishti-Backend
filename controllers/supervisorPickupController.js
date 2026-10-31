@@ -46,6 +46,9 @@
 const multer = require("multer");
 const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
+// Live-tracking window + cap live on the model so the client controller and
+// this one agree on exactly when tracking is visible.
+const { TRACKING_ACTIVE_STATUSES, MAX_TRACKING_POINTS } = Pickup;
 const Client = require("../models/Client");
 // Shared pickup-creation path, so a staff-created pickup is identical to a
 // client self-requested one (same validation, status, snapshots, notifications).
@@ -454,6 +457,19 @@ const updatePickupStatus = async (req, res) => {
             // otherwise stash on the evidence entry. We don't want to silently
             // drop the field — store it as part of evidence.notes if shape allows.
             evidenceEntry.notes = req.body.notes;
+        }
+
+        // Live tracking goes dark the moment the pickup leaves the active window
+        // (weighed / failed / no-show / postponed). Stamping endedAt here is what
+        // makes the client-facing tracking endpoints stop serving the link/trail
+        // — the client can no longer view or copy it once the pickup moves on.
+        if (
+            pickup.tracking &&
+            pickup.tracking.mode &&
+            !pickup.tracking.endedAt &&
+            !TRACKING_ACTIVE_STATUSES.includes(newStatus)
+        ) {
+            pickup.tracking.endedAt = new Date();
         }
 
         await pickup.save();
@@ -923,6 +939,156 @@ const createPickupOnBehalf = async (req, res) => {
     }
 };
 
+// ==================== LIVE TRACKING (agent side) ====================
+//
+// The agent shares their live location with the client when the pickup is
+// active. Two modes: 'link' (paste an external share URL) or 'gps' (stream
+// device points we store on the pickup). The client sees it through the gated
+// /api/client/pickups/:id/tracking endpoints, and only while active.
+
+/**
+ * Resolve the pickup for a tracking mutation, enforcing: authenticated, has
+ * supervisor permission, is the assigned supervisor. Returns { pickup } or
+ * sends the error response and returns null.
+ */
+const resolveOwnedPickup = async (req, res) => {
+    const me = getCurrentUser(req);
+    if (!me) { res.status(401).json({ message: "Not authorized" }); return null; }
+    const canSup = await assertCanSupervise(me);
+    if (!canSup) { res.status(403).json({ message: "You do not have supervisor permission" }); return null; }
+    const pickup = await Pickup.findById(req.params.id);
+    if (!pickup) { res.status(404).json({ message: "Pickup not found" }); return null; }
+    const assignedId = pickup.supervisor && pickup.supervisor.userId;
+    if (!assignedId || assignedId.toString() !== me.userId.toString()) {
+        res.status(403).json({ message: "You are not the assigned supervisor for this pickup" });
+        return null;
+    }
+    return { me, pickup };
+};
+
+/** A tracking summary safe to hand back to the agent (they may see their own link). */
+const trackingForAgent = (pickup) => {
+    const t = pickup.tracking;
+    if (!t || !t.mode) return { active: false };
+    return {
+        active: Pickup.isTrackingLive(pickup),
+        mode: t.mode,
+        link: t.mode === "link" ? t.link : undefined,
+        startedAt: t.startedAt,
+        endedAt: t.endedAt,
+        points: Array.isArray(t.trail) ? t.trail.length : 0,
+    };
+};
+
+// Nudge the client's open pickup view so the live map/button appears (or clears)
+// promptly, without waiting for a status change. Best-effort.
+const emitTracking = (pickup) => {
+    try {
+        getIo().to(`pickup_${pickup._id}`).emit("pickup:tracking", { pickupId: pickup._id });
+    } catch (e) {
+        console.error("Socket emit error (pickup tracking):", e.message || e);
+    }
+};
+
+// PUT /api/{role}/my-pickups/:id/tracking   { mode: "link"|"gps", link? }
+// Start (or switch) live tracking. Only allowed while the pickup is active.
+const setTracking = async (req, res) => {
+    try {
+        const got = await resolveOwnedPickup(req, res);
+        if (!got) return;
+        const { me, pickup } = got;
+
+        if (!TRACKING_ACTIVE_STATUSES.includes(pickup.status)) {
+            return res.status(409).json({
+                message: `Live tracking can only be shared while the pickup is active (en-route to at-facility). Current status: '${pickup.status}'.`,
+            });
+        }
+
+        const mode = String(req.body.mode || "").trim();
+        const by = { userType: me.userType, userId: me.userId, name: me.name };
+
+        if (mode === "link") {
+            const link = String(req.body.link || "").trim();
+            if (!/^https?:\/\/.+/i.test(link)) {
+                return res.status(400).json({
+                    message: "Enter a valid tracking link — it must start with http:// or https://.",
+                });
+            }
+            pickup.tracking = { mode: "link", link, startedAt: new Date(), endedAt: undefined, by, trail: undefined };
+        } else if (mode === "gps") {
+            pickup.tracking = { mode: "gps", startedAt: new Date(), endedAt: undefined, by, trail: [] };
+        } else {
+            return res.status(400).json({ message: "mode must be 'link' or 'gps'" });
+        }
+
+        await pickup.save();
+        emitTracking(pickup);
+        return res.json({ tracking: trackingForAgent(pickup) });
+    } catch (err) {
+        console.error("setTracking error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// POST /api/{role}/my-pickups/:id/tracking/ping   { lat, lng }
+// Append one live GPS point (mode 'gps' only). Called on an interval by the
+// agent's run screen while the pickup is active.
+const pingTracking = async (req, res) => {
+    try {
+        const got = await resolveOwnedPickup(req, res);
+        if (!got) return;
+        const { pickup } = got;
+
+        if (!pickup.tracking || pickup.tracking.mode !== "gps") {
+            return res.status(409).json({ message: "GPS tracking is not active for this pickup." });
+        }
+        if (pickup.tracking.endedAt || !TRACKING_ACTIVE_STATUSES.includes(pickup.status)) {
+            return res.status(409).json({ message: "The live tracking window for this pickup has ended." });
+        }
+
+        const lat = Number(req.body.lat);
+        const lng = Number(req.body.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            return res.status(400).json({ message: "lat and lng are required numbers" });
+        }
+
+        pickup.tracking.trail = pickup.tracking.trail || [];
+        pickup.tracking.trail.push({ lat, lng, at: new Date() });
+        if (pickup.tracking.trail.length > MAX_TRACKING_POINTS) {
+            pickup.tracking.trail = pickup.tracking.trail.slice(-MAX_TRACKING_POINTS);
+        }
+        await pickup.save();
+        emitTracking(pickup);
+        return res.json({ ok: true, points: pickup.tracking.trail.length });
+    } catch (err) {
+        console.error("pingTracking error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// DELETE /api/{role}/my-pickups/:id/tracking
+// Agent stops sharing before the pickup moves on. Idempotent.
+const stopTracking = async (req, res) => {
+    try {
+        const got = await resolveOwnedPickup(req, res);
+        if (!got) return;
+        const { pickup } = got;
+
+        if (!pickup.tracking || !pickup.tracking.mode) {
+            return res.json({ ok: true });
+        }
+        if (!pickup.tracking.endedAt) {
+            pickup.tracking.endedAt = new Date();
+            await pickup.save();
+            emitTracking(pickup);
+        }
+        return res.json({ ok: true });
+    } catch (err) {
+        console.error("stopTracking error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listMyPickups,
     listWasteCategories,
@@ -930,6 +1096,9 @@ module.exports = {
     recordWasteData,
     listClientsForPickup,
     createPickupOnBehalf,
+    setTracking,
+    pingTracking,
+    stopTracking,
     // Prefer `uploadEvidence` in routes — it turns multer failures into clear
     // 400s. `upload` stays exported for anything that wants the raw middleware.
     uploadEvidence,

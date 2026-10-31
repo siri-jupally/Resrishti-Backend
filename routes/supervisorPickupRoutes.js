@@ -48,6 +48,11 @@ const factory = (roleAuth, opts = {}) => {
     // wrong MIME) into readable 400s. Accepts `photos[]` — one or many — plus
     // the legacy single `photo` field from older installed app builds.
     r.patch("/:id/status", roleAuth, ctrl.uploadEvidence, ctrl.updatePickupStatus);
+    // Live tracking (JSON, no multipart): start/switch, append a GPS point, stop.
+    // Only the assigned supervisor, only while the pickup is active.
+    r.put("/:id/tracking", roleAuth, ctrl.setTracking);
+    r.post("/:id/tracking/ping", roleAuth, ctrl.pingTracking);
+    r.delete("/:id/tracking", roleAuth, ctrl.stopTracking);
     // Waste-data submission. Multer parses multipart and optionally lifts a
     // file off the `weighbridgePhoto` field. lineItems arrives as a JSON
     // string in req.body (multipart can't carry arrays natively).

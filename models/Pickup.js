@@ -153,6 +153,37 @@ const wasteChangeSchema = new mongoose.Schema(
     { _id: false }
 );
 
+// Live GPS tracking of a pickup in the field, surfaced to the client ONLY while
+// the pickup is active (see TRACKING_ACTIVE_STATUSES below). Two modes:
+//   - 'link': the agent pastes an external share URL (e.g. a Google Maps "share
+//     live location" link). The raw link is held here and NEVER returned in the
+//     general pickup payload — the client reaches it only through the gated
+//     /tracking endpoints, and only while the pickup is active.
+//   - 'gps':  the agent's device streams points we store here, pickup-scoped
+//     (not the agent's whole-day attendance trail), capped to the last N points.
+// `endedAt` is stamped the moment the pickup leaves the active window (or the
+// agent stops sharing); once set, the client can no longer read or open it.
+const trackingPointSchema = new mongoose.Schema(
+    { lat: Number, lng: Number, at: { type: Date, default: Date.now } },
+    { _id: false }
+);
+const trackingSchema = new mongoose.Schema(
+    {
+        mode: { type: String, enum: ["link", "gps"] },
+        link: String,
+        startedAt: Date,
+        endedAt: Date,
+        by: {
+            userType: { type: String, enum: ["Admin", "Manager", "Employee"] },
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            _id: false,
+        },
+        trail: { type: [trackingPointSchema], default: undefined },
+    },
+    { _id: false }
+);
+
 const pickupSchema = new mongoose.Schema(
     {
         // Format: PU-YYYYMMDD-XXXXXX (6 hex chars). Generated in the controller
@@ -281,6 +312,10 @@ const pickupSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: "Certificate",
         },
+
+        // Live GPS tracking shared with the client while the pickup is in the
+        // field. See trackingSchema above and isTrackingLive() below.
+        tracking: { type: trackingSchema, default: undefined },
     },
     { timestamps: true }
 );
@@ -316,5 +351,34 @@ const photosOf = (evidenceEntry) => {
         : [];
 };
 
+/**
+ * Statuses during which live tracking is shown to the client. Chosen window:
+ * en-route through at-facility — it goes dark at 'weighed' and at any terminal
+ * state. Mirrored on the frontend (lib/pickupStatus.js TRACKING_ACTIVE_STATUSES).
+ */
+const TRACKING_ACTIVE_STATUSES = ["en-route", "at-client", "picked-up", "at-facility"];
+
+// Most GPS points we keep per pickup. At one point every ~10-15s a long pickup
+// stays well under this; the cap just bounds a stuck-sharing session.
+const MAX_TRACKING_POINTS = 500;
+
+/**
+ * True when this pickup's live tracking is currently visible to the client:
+ * tracking is set up, has not been ended, and the pickup is in the active
+ * window. Every client-facing tracking read gates on this — once it returns
+ * false the link/trail is no longer reachable or copyable.
+ *
+ * @param {Object} pickup - a Pickup document or lean object (needs status + tracking)
+ * @returns {boolean}
+ */
+const isTrackingLive = (pickup) => {
+    if (!pickup || !pickup.tracking || !pickup.tracking.mode) return false;
+    if (pickup.tracking.endedAt) return false;
+    return TRACKING_ACTIVE_STATUSES.includes(pickup.status);
+};
+
 module.exports = Pickup;
 module.exports.photosOf = photosOf;
+module.exports.TRACKING_ACTIVE_STATUSES = TRACKING_ACTIVE_STATUSES;
+module.exports.MAX_TRACKING_POINTS = MAX_TRACKING_POINTS;
+module.exports.isTrackingLive = isTrackingLive;

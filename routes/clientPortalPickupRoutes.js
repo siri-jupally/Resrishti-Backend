@@ -20,5 +20,9 @@ router.post("/", protectClient, ctrl.requestPickup);
 router.get("/", protectClient, ctrl.listMyPickups);
 router.get("/:id", protectClient, ctrl.getMyPickup);
 router.patch("/:id/cancel", protectClient, ctrl.cancelMyPickup);
+// Live tracking — gated so the client can only read it while the pickup is
+// active, and never sees the raw link except via the explicit open below.
+router.get("/:id/tracking", protectClient, ctrl.getTracking);
+router.get("/:id/tracking/link", protectClient, ctrl.openTrackingLink);
 
 module.exports = router;

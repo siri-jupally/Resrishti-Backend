@@ -26,6 +26,7 @@
 */
 const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
+const { isTrackingLive } = Pickup;
 const Admin = require("../models/Admin");
 const Manager = require("../models/Manager");
 const { sendPush } = require("../utils/push");
@@ -58,6 +59,16 @@ const maskPickupForClient = (doc) => {
     const p = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
     if (p.status !== "cert-sent") delete p.certificate;
     if (INTERNAL_CERT_STAGES.has(p.status)) p.status = "processed";
+    // Live tracking: the general payload says ONLY whether it's live and which
+    // mode — never the raw share link or the GPS trail. The live data comes from
+    // the gated /tracking endpoints, and only while the pickup is active. Masking
+    // here (not just in the UI) means the raw API response can't be read to copy
+    // the link or keep watching after the pickup ends.
+    if (p.tracking) {
+        p.tracking = isTrackingLive(doc)
+            ? { active: true, mode: p.tracking.mode }
+            : { active: false };
+    }
     return p;
 };
 
@@ -257,9 +268,87 @@ const cancelMyPickup = async (req, res) => {
     }
 };
 
+// ==================== LIVE TRACKING (client side) ====================
+//
+// Both gated on isTrackingLive(): the moment the pickup leaves the active
+// window (or the agent stops), these stop returning anything — so the client
+// can neither keep watching nor copy the link after the pickup ends.
+
+/**
+ * Load the client's own pickup for a tracking read. Returns the pickup or sends
+ * the error response and returns null. Same ownership guard as getMyPickup.
+ */
+const resolveClientPickup = async (req, res) => {
+    const pickup = await Pickup.findById(req.params.id);
+    if (!pickup) { res.status(404).json({ message: "Pickup not found" }); return null; }
+    if (pickup.client.toString() !== req.client._id.toString()) {
+        res.status(403).json({ message: "Forbidden" });
+        return null;
+    }
+    return pickup;
+};
+
+// GET /api/client/pickups/:id/tracking
+// Returns the live position (gps) or just that a link is available (link).
+// Never returns the raw link. { active:false } once the pickup is no longer live.
+const getTracking = async (req, res) => {
+    try {
+        const pickup = await resolveClientPickup(req, res);
+        if (!pickup) return;
+
+        if (!isTrackingLive(pickup)) {
+            return res.json({ active: false });
+        }
+
+        const t = pickup.tracking;
+        const agentName = (pickup.supervisor && pickup.supervisor.name) || "Pickup agent";
+
+        if (t.mode === "gps") {
+            const trail = (t.trail || []).map((p) => ({ lat: p.lat, lng: p.lng, at: p.at }));
+            return res.json({
+                active: true,
+                mode: "gps",
+                last: trail.length ? trail[trail.length - 1] : null,
+                trail,
+                agentName,
+                startedAt: t.startedAt,
+                status: pickup.status,
+            });
+        }
+
+        // link mode — the URL itself is fetched only on explicit open (below).
+        return res.json({ active: true, mode: "link", agentName, startedAt: t.startedAt, status: pickup.status });
+    } catch (err) {
+        console.error("getTracking error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// GET /api/client/pickups/:id/tracking/link
+// Hands back the external share URL for 'link' mode — ONLY while the pickup is
+// active. The client UI fetches this on an explicit "Track live" click and
+// immediately opens it, so the URL never sits in the pickup payload or as
+// copyable text on the page. Hard 403 once the pickup is no longer live.
+const openTrackingLink = async (req, res) => {
+    try {
+        const pickup = await resolveClientPickup(req, res);
+        if (!pickup) return;
+
+        if (!isTrackingLive(pickup) || pickup.tracking.mode !== "link" || !pickup.tracking.link) {
+            return res.status(403).json({ message: "Live tracking is not available for this pickup." });
+        }
+        return res.json({ url: pickup.tracking.link });
+    } catch (err) {
+        console.error("openTrackingLink error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     requestPickup,
     listMyPickups,
     getMyPickup,
     cancelMyPickup,
+    getTracking,
+    openTrackingLink,
 };
