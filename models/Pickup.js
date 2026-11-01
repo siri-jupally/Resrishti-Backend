@@ -196,9 +196,10 @@ const pickupSchema = new mongoose.Schema(
         //       7-stage revamp. Existing rows are backfilled to 1; a MISSING value
         //       is also treated as 1 (see isLegacyPipeline + migrations/0001).
         //   2 = new 7-stage flow + explicit Closure (lands in Phase 1).
-        // Default stays 1 until the v2 flow ships, so nothing changes in Phase 0.
-        // Never rewrite this on an existing pickup.
-        pipelineVersion: { type: Number, default: 1, enum: [1, 2], index: true },
+        // NEW pickups default to 2 (the 7-stage flow is now built). Existing rows
+        // were backfilled to 1 and are grandfathered. Never rewrite this on an
+        // existing pickup.
+        pipelineVersion: { type: Number, default: 2, enum: [1, 2], index: true },
 
         client: {
             type: mongoose.Schema.Types.ObjectId,
