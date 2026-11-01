@@ -135,7 +135,7 @@ All tests run on the **cluster0 test DB (prod copy)** before any deploy. Combine
 ## 6. Decisions (LOCKED 2026-11-01)
 
 - **Q1 — three "types" = CoD + Impact + GHG.** No new document types. Extend the existing CoD certificate and the two reports with the new generation methods.
-- **Q2 — weighing = per-stream manual entry stays the source of truth.** Stages 2 & 6 capture empty/loaded **vehicle** weights as **evidence + a cross-check** only; they do **not** derive per-stream quantities. (Net vehicle weight may be shown at closure as a reconciliation figure.)
+- **Q2 — weighing = per-stream manual entry stays the source of truth, split into preliminary vs confirmed** (clarified 2026-11-01). The vehicle empty/loaded weights (stages 2 & 6) are **evidence + cross-check** only. Stream-wise entry is retained **during the pickup**: at **Stage 6 (loaded weighbridge)** the agent enters **PRELIMINARY** stream weights (v1-style, with an optional weighbridge-slip photo) — an estimate. At **Closure** the office re-segregates, edits and **CONFIRMS** the final weights. Model: `weightsStatus: none → preliminary → confirmed` (+ `weightsConfirmedAt/By`); certificates + impact use the **confirmed** weights. Preliminary and confirmed sets are both kept in `wasteDataHistory`.
 - **Q3 — decouple BOTH client dashboard AND public stats** → count **closed** pickups everywhere. Accepted consequence: the client + public live impact numbers jump from ~20 to ~207 pickups. Monthly reports unchanged (already counted these).
 - **Q4 — grandfather the ~33 in-flight pickups** on the v1 flow. Only new pickups use v2.
 

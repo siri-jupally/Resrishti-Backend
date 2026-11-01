@@ -474,6 +474,40 @@ const updatePickupStatus = async (req, res) => {
             }
         }
 
+        // v2 loaded-weighbridge stage ALSO captures PRELIMINARY stream-wise
+        // weights (the familiar per-stream entry). These are an estimate — the
+        // facility re-segregates and the final weights are confirmed at Closure.
+        let prelimLineItems = null;
+        if (!legacy && newStatus === V2_LOADED_WEIGH) {
+            let raw = req.body.lineItems;
+            if (typeof raw === "string") {
+                try { raw = JSON.parse(raw); }
+                catch { return res.status(400).json({ message: "lineItems must be a JSON-stringified array" }); }
+            }
+            if (!Array.isArray(raw) || raw.length === 0) {
+                return res.status(400).json({ message: "Enter at least one waste stream weight at the loaded-weighbridge stage." });
+            }
+            const validStreams = new Set(await require("../utils/wasteCategories").allStreamKeys());
+            const merged = new Map();
+            for (let i = 0; i < raw.length; i += 1) {
+                const item = raw[i] || {};
+                const stream = String(item.stream || "").trim();
+                const qtyKg = Number(item.qtyKg);
+                if (!stream || !validStreams.has(stream)) {
+                    return res.status(400).json({ message: `lineItems[${i}].stream must be one of: ${[...validStreams].join(", ")}` });
+                }
+                if (!Number.isFinite(qtyKg) || qtyKg <= 0) {
+                    return res.status(400).json({ message: `lineItems[${i}].qtyKg must be a positive number` });
+                }
+                if (merged.has(stream)) merged.get(stream).qtyKg += qtyKg;
+                else merged.set(stream, { stream, qtyKg, notes: item.notes ? String(item.notes) : undefined });
+            }
+            const items = [...merged.values()];
+            const total = Math.round(items.reduce((a, li) => a + li.qtyKg, 0) * 100) / 100;
+            if (total <= 0) return res.status(400).json({ message: "Total stream weight must be greater than zero." });
+            prelimLineItems = { items, total };
+        }
+
         // Upload every image (postponed/scheduled may legitimately send none).
         //
         // All-or-nothing on purpose: if any one image fails we abort BEFORE
@@ -530,6 +564,25 @@ const updatePickupStatus = async (req, res) => {
         pickup.evidence.push(evidenceEntry);
         pickup.status = newStatus;
         if (weightUpdate) pickup.vehicleWeights = weightUpdate;
+        if (prelimLineItems) {
+            const now = new Date();
+            const actor = { userType: me.userType, userId: me.userId, name: me.name };
+            const prevTotal = pickup.totalKg || 0;
+            pickup.lineItems = prelimLineItems.items;
+            pickup.totalKg = prelimLineItems.total;
+            pickup.weightsStatus = "preliminary";
+            pickup.wasteDataEnteredAt = now;
+            pickup.wasteDataEnteredBy = actor;
+            pickup.wasteDataHistory = pickup.wasteDataHistory || [];
+            pickup.wasteDataHistory.push({
+                lineItems: prelimLineItems.items.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+                totalKg: prelimLineItems.total,
+                previousTotalKg: prevTotal,
+                reason: "Preliminary weights recorded in the field (loaded weighbridge)",
+                at: now,
+                by: actor,
+            });
+        }
         if (FIELD_TERMINAL.has(newStatus)) {
             pickup.failureReason = failureReason;
             evidenceEntry.notes = failureReason;

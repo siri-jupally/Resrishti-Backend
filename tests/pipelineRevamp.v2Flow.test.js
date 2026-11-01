@@ -92,7 +92,7 @@ describe("Phase 1 — v2 7-stage workflow", () => {
             ["v2-at-client", {}],
             ["v2-loading", {}],
             ["v2-loaded", {}],
-            ["v2-loaded-weighed", { body: { loadedKg: 1850 } }],
+            ["v2-loaded-weighed", { body: { loadedKg: 1850, lineItems: JSON.stringify([{ stream: "plastic", qtyKg: 500 }, { stream: "paper", qtyKg: 300 }]) } }],
             ["v2-at-facility", {}],
         ];
         for (const [status, opts] of steps) {
@@ -104,9 +104,22 @@ describe("Phase 1 — v2 7-stage workflow", () => {
         expect(fresh.vehicleWeights.emptyKg).toBe(1000);
         expect(fresh.vehicleWeights.loadedKg).toBe(1850);
         expect(fresh.vehicleWeights.netKg).toBe(850);
+        // preliminary stream weights recorded at the loaded-weighbridge stage
+        expect(fresh.weightsStatus).toBe("preliminary");
+        expect(fresh.lineItems).toHaveLength(2);
+        expect(fresh.totalKg).toBe(800);
+        expect(fresh.wasteDataHistory.some((h) => /preliminary/i.test(h.reason))).toBe(true);
         // every stage left an evidence entry with a photo
         expect(fresh.evidence).toHaveLength(7);
         expect(fresh.evidence.every((e) => e.photos && e.photos.length > 0)).toBe(true);
+    });
+
+    it("requires preliminary stream weights at the loaded-weighbridge stage", async () => {
+        const p = await makePickup(2, "v2-loaded");
+        await Pickup.updateOne({ _id: p._id }, { $set: { vehicleWeights: { emptyKg: 1000 } } });
+        const res = await advance(p._id, "v2-loaded-weighed", { body: { loadedKg: 1850 } }); // no lineItems
+        expect(res.statusCode).toBe(400);
+        expect(res.body.message).toMatch(/waste stream weight/i);
     });
 
     it("requires a photo at EVERY v2 stage", async () => {

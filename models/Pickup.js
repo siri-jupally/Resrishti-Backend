@@ -329,6 +329,26 @@ const pickupSchema = new mongoose.Schema(
         // Audit of the weights: the first entry plus every later correction.
         wasteDataHistory: [wasteChangeSchema],
 
+        // Preliminary vs final confirmed weights (v2 pipeline).
+        //   'none'        — no stream weights yet.
+        //   'preliminary' — entered in the field at the loaded-weighbridge stage
+        //                   (an estimate; segregation may change it).
+        //   'confirmed'   — reviewed, corrected and confirmed at Closure (final;
+        //                   this is what certificates and impact use).
+        // v1 pickups leave this 'none' (their lineItems have always been final).
+        weightsStatus: {
+            type: String,
+            enum: ["none", "preliminary", "confirmed"],
+            default: "none",
+        },
+        weightsConfirmedAt: Date,
+        weightsConfirmedBy: {
+            userType: String,
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            _id: false,
+        },
+
         // Cert — populated as it moves draft → issued → sent. The `Certificate`
         // model doesn't exist yet (Phase 1 step 8). Mongoose resolves refs
         // lazily on populate, so declaring this here is safe.
