@@ -16,6 +16,8 @@ const { protectTriage } = require("../middleware/authTriage");
 const ctrl = require("../controllers/certificateController");
 
 router.get("/", protectTriage, ctrl.listCertificates);
+// Manually draft a CoD for a closed v2 pickup (v1 auto-drafts at waste-data).
+router.post("/generate", protectTriage, ctrl.generateCertificateForPickup);
 router.get("/:id", protectTriage, ctrl.getCertificate);
 router.patch("/:id/issue", protectTriage, ctrl.issueCertificate);
 router.post("/:id/send", protectTriage, ctrl.sendCertificate);

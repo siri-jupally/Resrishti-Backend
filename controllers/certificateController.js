@@ -41,6 +41,7 @@ const Pickup = require("../models/Pickup");
 const Certificate = require("../models/Certificate");
 
 const { uploadFile, getS3Client } = require("../utils/s3");
+const { generateCertNumber } = require("../utils/certNumber");
 const { renderCertificatePdf } = require("../utils/certificatePdf");
 const { sendEmail } = require("../utils/emailService");
 const { notifyIfEnabled } = require("../utils/push");
@@ -475,12 +476,16 @@ const issueCertificate = async (req, res) => {
         try {
             const pkup = await Pickup.findById(cert.pickup);
             if (pkup) {
-                pkup.status = "cert-issued";
+                // v1 mirrors the cert lifecycle onto pickup.status; v2 pickups
+                // stay 'closed' (certs are decoupled) — only log the milestone.
+                const legacy = Pickup.isLegacyPipeline(pkup);
+                if (legacy) pkup.status = "cert-issued";
                 pkup.evidence = pkup.evidence || [];
                 pkup.evidence.push({
-                    status: "cert-issued",
+                    status: legacy ? "cert-issued" : pkup.status,
                     at: new Date(),
                     by: actor,
+                    notes: legacy ? undefined : `Certificate ${cert.certNumber} issued`,
                 });
                 await pkup.save();
 
@@ -488,7 +493,7 @@ const issueCertificate = async (req, res) => {
                     const io = getIo();
                     io.to(`pickup_${pkup._id}`).emit("pickup:status-updated", {
                         pickupId: pkup._id,
-                        status: "cert-issued",
+                        status: pkup.status,
                         certificateId: cert._id,
                     });
                 } catch (socketErr) {
@@ -619,12 +624,16 @@ const sendCertificate = async (req, res) => {
         try {
             const pkup = await Pickup.findById(cert.pickup);
             if (pkup) {
-                pkup.status = "cert-sent";
+                // v1 mirrors the cert lifecycle onto pickup.status; v2 pickups
+                // stay 'closed' (certs are decoupled) — only log the milestone.
+                const legacy = Pickup.isLegacyPipeline(pkup);
+                if (legacy) pkup.status = "cert-sent";
                 pkup.evidence = pkup.evidence || [];
                 pkup.evidence.push({
-                    status: "cert-sent",
+                    status: legacy ? "cert-sent" : pkup.status,
                     at: new Date(),
                     by: actor,
+                    notes: legacy ? undefined : `Certificate ${cert.certNumber} sent`,
                 });
                 await pkup.save();
 
@@ -632,7 +641,7 @@ const sendCertificate = async (req, res) => {
                     const io = getIo();
                     io.to(`pickup_${pkup._id}`).emit("pickup:status-updated", {
                         pickupId: pkup._id,
-                        status: "cert-sent",
+                        status: pkup.status,
                         certificateId: cert._id,
                     });
                 } catch (socketErr) {
@@ -933,9 +942,127 @@ const cancelCertificate = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/manager/certificates/generate   { pickupId }
+ *
+ * Manually draft a CoD for a CLOSED v2 pickup. v1 pickups auto-draft at
+ * waste-data entry; v2 pickups close WITHOUT a certificate (closure and certs
+ * are deliberately decoupled — see supervisorPickupController.closeRun), so a
+ * coordinator generates the CoD here when they're ready. It drafts from the
+ * pickup's CONFIRMED closure weights; the existing issue → send flow takes over.
+ *
+ * The pickup stays 'closed' — generating / issuing / sending a cert never moves
+ * a v2 pickup out of its terminal state (issue/send mirror this guard).
+ */
+const generateCertificateForPickup = async (req, res) => {
+    try {
+        if (!canTriage(req)) {
+            return res.status(403).json({ message: "You do not have certificate permission" });
+        }
+        const pickupId = req.body.pickupId || req.body.pickup;
+        if (!pickupId || !mongoose.Types.ObjectId.isValid(String(pickupId))) {
+            return res.status(400).json({ message: "A valid pickupId is required" });
+        }
+
+        const pickup = await Pickup.findById(pickupId);
+        if (!pickup) return res.status(404).json({ message: "Pickup not found" });
+
+        // v2-only, closed-only. v1 pickups already carry an auto-drafted cert.
+        if (Pickup.isLegacyPipeline(pickup)) {
+            return res.status(409).json({
+                message: "This pickup auto-drafts its certificate at waste-data entry — nothing to generate manually.",
+            });
+        }
+        if (pickup.status !== "closed") {
+            return res.status(409).json({
+                message: `A certificate can only be generated once the pickup is closed (current: '${pickup.status}').`,
+                allowedFromStatus: ["closed"],
+            });
+        }
+        if (!Array.isArray(pickup.lineItems) || pickup.lineItems.length === 0) {
+            return res.status(409).json({ message: "This pickup has no confirmed stream weights to certify." });
+        }
+
+        // Idempotency — don't mint a second live cert for the same pickup. A
+        // cancelled/superseded prior cert doesn't block a fresh one.
+        if (pickup.certificate) {
+            const existing = await Certificate.findById(pickup.certificate).select("status certNumber").lean();
+            if (existing && !["cancelled", "superseded"].includes(existing.status)) {
+                return res.status(409).json({
+                    message: `A certificate (${existing.certNumber}) already exists for this pickup.`,
+                    certificateId: pickup.certificate,
+                });
+            }
+        }
+
+        const clientDoc = await Client.findById(pickup.client).select("name").lean();
+        const clientName = (clientDoc && clientDoc.name) || pickup.clientNameSnapshot || "";
+
+        let certNumber;
+        try {
+            certNumber = await generateCertNumber();
+        } catch (numErr) {
+            console.error("Cert number generation failed:", numErr);
+            return res.status(500).json({ message: "Failed to generate certificate number" });
+        }
+
+        const totalKg = pickup.totalKg
+            || pickup.lineItems.reduce((a, li) => a + (Number(li.qtyKg) || 0), 0);
+
+        let cert;
+        try {
+            cert = await Certificate.create({
+                certNumber,
+                revision: 1,
+                pickup: pickup._id,
+                client: pickup.client,
+                status: "draft",
+                lineItemsSnapshot: pickup.lineItems.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+                totalKgSnapshot: totalKg,
+                clientNameSnapshot: clientName,
+                pickupDateSnapshot:
+                    pickup.scheduledDate || pickup.weightsConfirmedAt || pickup.wasteDataEnteredAt || new Date(),
+            });
+        } catch (certErr) {
+            console.error("Certificate draft creation failed:", certErr);
+            return res.status(500).json({ message: "Failed to draft certificate." });
+        }
+
+        // Link the cert but DON'T move the pickup out of 'closed' — the cert has
+        // its own lifecycle from here. Record the milestone on the evidence log.
+        const actor = actorFromReq(req);
+        pickup.certificate = cert._id;
+        pickup.evidence = pickup.evidence || [];
+        pickup.evidence.push({
+            status: pickup.status, // stays 'closed'
+            at: new Date(),
+            by: actor,
+            notes: `Certificate ${certNumber} drafted`,
+        });
+        await pickup.save();
+
+        try {
+            getIo().to(`pickup_${pickup._id}`).emit("pickup:status-updated", {
+                pickupId: pickup._id,
+                status: pickup.status,
+                certificateId: cert._id,
+            });
+        } catch (socketErr) {
+            console.error("Socket emit error (cert generate):", socketErr.message || socketErr);
+        }
+
+        const populated = await Certificate.findById(cert._id).populate("pickup").populate("client").lean();
+        return res.status(201).json(populated);
+    } catch (err) {
+        console.error("generateCertificateForPickup error:", err);
+        return res.status(500).json({ message: "Server error" });
+    }
+};
+
 module.exports = {
     listCertificates,
     getCertificate,
+    generateCertificateForPickup,
     issueCertificate,
     sendCertificate,
     reviseCertificate,
