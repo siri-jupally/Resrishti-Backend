@@ -2,9 +2,10 @@
   Phase 1 — v2 (7-stage) pickup workflow, backend state machine.
 
   Drives updatePickupStatus directly (same pattern as certificateWeights.test.js)
-  to verify: the 7-stage happy path with vehicle-weight capture + net calc, that
-  every v2 stage is photo-gated, weight validation, invalid transitions, and that
-  legacy (v1) pickups are untouched / grandfathered on the old flow.
+  to verify: the 7-stage happy path with stream-wise PRELIMINARY weights entered
+  at the loaded-weighbridge stage (no vehicle weighing), that the field stages are
+  photo-gated, invalid transitions, and that legacy (v1) pickups are untouched /
+  grandfathered on the old flow.
 */
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
@@ -84,15 +85,15 @@ beforeEach(async () => {
 });
 
 describe("Phase 1 — v2 7-stage workflow", () => {
-    it("walks all 7 stages and records empty/loaded/net vehicle weights", async () => {
+    it("walks all 7 stages and records stream-wise preliminary weights (no vehicle weighing)", async () => {
         const p = await makePickup(2, "scheduled");
         const steps = [
             ["v2-departed", {}],
-            ["v2-empty-weighed", { body: { emptyKg: 1000 } }],
+            ["v2-empty-weighed", {}],
             ["v2-at-client", {}],
             ["v2-loading", {}],
             ["v2-loaded", {}],
-            ["v2-loaded-weighed", { body: { loadedKg: 1850, lineItems: JSON.stringify([{ stream: "plastic", qtyKg: 500 }, { stream: "paper", qtyKg: 300 }]) } }],
+            ["v2-loaded-weighed", { body: { lineItems: JSON.stringify([{ stream: "plastic", qtyKg: 500 }, { stream: "paper", qtyKg: 300 }]) } }],
             ["v2-at-facility", {}],
         ];
         for (const [status, opts] of steps) {
@@ -101,9 +102,8 @@ describe("Phase 1 — v2 7-stage workflow", () => {
         }
         const fresh = await Pickup.findById(p._id);
         expect(fresh.status).toBe("v2-at-facility");
-        expect(fresh.vehicleWeights.emptyKg).toBe(1000);
-        expect(fresh.vehicleWeights.loadedKg).toBe(1850);
-        expect(fresh.vehicleWeights.netKg).toBe(850);
+        // no vehicle empty/loaded/net weights are captured anymore
+        expect(fresh.vehicleWeights).toBeUndefined();
         // preliminary stream weights recorded at the loaded-weighbridge stage
         expect(fresh.weightsStatus).toBe("preliminary");
         expect(fresh.lineItems).toHaveLength(2);
@@ -116,36 +116,29 @@ describe("Phase 1 — v2 7-stage workflow", () => {
 
     it("requires preliminary stream weights at the loaded-weighbridge stage", async () => {
         const p = await makePickup(2, "v2-loaded");
-        await Pickup.updateOne({ _id: p._id }, { $set: { vehicleWeights: { emptyKg: 1000 } } });
-        const res = await advance(p._id, "v2-loaded-weighed", { body: { loadedKg: 1850 } }); // no lineItems
+        const res = await advance(p._id, "v2-loaded-weighed", {}); // no lineItems
         expect(res.statusCode).toBe(400);
         expect(res.body.message).toMatch(/waste stream weight/i);
     });
 
-    it("requires a photo at EVERY v2 stage", async () => {
+    it("accepts the loaded-weighbridge stage with NO photo (stream entry is photo-optional, like v1)", async () => {
+        const p = await makePickup(2, "v2-loaded");
+        const res = await advance(p._id, "v2-loaded-weighed", {
+            noPhoto: true,
+            body: { lineItems: JSON.stringify([{ stream: "plastic", qtyKg: 120 }]) },
+        });
+        expect(res.statusCode).toBe(200);
+        const fresh = await Pickup.findById(p._id);
+        expect(fresh.status).toBe("v2-loaded-weighed");
+        expect(fresh.weightsStatus).toBe("preliminary");
+        expect(fresh.totalKg).toBe(120);
+    });
+
+    it("requires a photo at the field stages (e.g. v2-departed)", async () => {
         const p = await makePickup(2, "scheduled");
         const res = await advance(p._id, "v2-departed", { noPhoto: true });
         expect(res.statusCode).toBe(400);
         expect(res.body.message).toMatch(/Photo evidence is required/);
-    });
-
-    it("requires emptyKg at the empty-weighbridge stage", async () => {
-        const p = await makePickup(2, "v2-departed");
-        const res = await advance(p._id, "v2-empty-weighed", {}); // no emptyKg
-        expect(res.statusCode).toBe(400);
-        expect(res.body.message).toMatch(/emptyKg/);
-    });
-
-    it("rejects a loaded weight that isn't greater than empty", async () => {
-        const p = await makePickup(2, "scheduled");
-        await advance(p._id, "v2-departed");
-        await advance(p._id, "v2-empty-weighed", { body: { emptyKg: 1000 } });
-        await advance(p._id, "v2-at-client");
-        await advance(p._id, "v2-loading");
-        await advance(p._id, "v2-loaded");
-        const res = await advance(p._id, "v2-loaded-weighed", { body: { loadedKg: 900 } });
-        expect(res.statusCode).toBe(400);
-        expect(res.body.message).toMatch(/greater than empty/);
     });
 
     it("rejects an invalid v2 transition (skipping a stage)", async () => {
@@ -175,10 +168,19 @@ describe("Phase 1 — v1 pickups are grandfathered (unchanged)", () => {
         expect(res.statusCode).toBe(409);
     });
 
-    it("a pickup with missing pipelineVersion is treated as v1", async () => {
+    it("real legacy rows are grandfathered by the migration's explicit pipelineVersion:1, not by a missing field", async () => {
+        // Now that the schema default is 2, a row whose field is genuinely
+        // absent (e.g. inserted raw) picks up that default on hydration and
+        // runs the v2 flow — so a v1-only transition is rejected...
         const p = await makePickup(2, "scheduled");
         await Pickup.collection.updateOne({ _id: p._id }, { $unset: { pipelineVersion: "" } });
-        const res = await advance(p._id, "en-route"); // legacy transition
-        expect(res.statusCode).toBe(200);
+        const asV2 = await advance(p._id, "en-route"); // v1-only transition
+        expect(asV2.statusCode).toBe(409);
+        // ...which is exactly why the migration backfills every existing row to
+        // an explicit 1. Once it is 1, the legacy flow applies.
+        await Pickup.collection.updateOne({ _id: p._id }, { $set: { pipelineVersion: 1 } });
+        const asV1 = await advance(p._id, "en-route");
+        expect(asV1.statusCode).toBe(200);
+        expect((await Pickup.findById(p._id)).status).toBe("en-route");
     });
 });

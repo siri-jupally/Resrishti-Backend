@@ -261,12 +261,15 @@ const ALLOWED_NEXT_V2 = {
     "v2-at-facility": [], // Closure handled by the P2 closure endpoint, not here.
 };
 
-// Every v2 field stage requires a photo (vs the 3 operational captures in v1).
-const PHOTO_REQUIRED_FOR_V2 = new Set(V2_FIELD_STATUSES);
+// v2 field stages require a photo — EXCEPT the loaded-weighbridge stage, which
+// carries the stream-wise weight entry (exactly like v1's WasteDataForm, where
+// the weighbridge photo is optional).
+const PHOTO_REQUIRED_FOR_V2 = new Set(
+    V2_FIELD_STATUSES.filter((s) => s !== "v2-loaded-weighed")
+);
 
-// v2 stages that also capture a weighbridge vehicle weight.
-const V2_EMPTY_WEIGH = "v2-empty-weighed";   // body.emptyKg
-const V2_LOADED_WEIGH = "v2-loaded-weighed"; // body.loadedKg → net = loaded − empty
+// The loaded-weighbridge stage is where preliminary stream weights are entered.
+const V2_LOADED_WEIGH = "v2-loaded-weighed";
 
 /**
  * Normalize the authenticated principal regardless of which auth middleware ran.
@@ -442,39 +445,7 @@ const updatePickupStatus = async (req, res) => {
             });
         }
 
-        // v2 weighbridge stages capture a vehicle weight (cross-check only, not
-        // the per-stream source of truth). Validate BEFORE uploading photos so a
-        // bad/missing weight fails fast without leaving an orphan image.
-        let weightUpdate = null;
-        if (!legacy && (newStatus === V2_EMPTY_WEIGH || newStatus === V2_LOADED_WEIGH)) {
-            const key = newStatus === V2_EMPTY_WEIGH ? "emptyKg" : "loadedKg";
-            const val = Number(req.body[key]);
-            if (!Number.isFinite(val) || val <= 0) {
-                return res.status(400).json({
-                    message: `${key} (a positive number) is required for '${newStatus}'.`,
-                });
-            }
-            const existing = (pickup.vehicleWeights && pickup.vehicleWeights.toObject
-                ? pickup.vehicleWeights.toObject() : pickup.vehicleWeights) || {};
-            weightUpdate = { ...existing, [key]: val };
-            if (newStatus === V2_LOADED_WEIGH) {
-                const empty = Number(existing.emptyKg);
-                if (!Number.isFinite(empty)) {
-                    return res.status(409).json({
-                        message: "Empty vehicle weight wasn't recorded at the empty-weighbridge stage; cannot compute net weight.",
-                    });
-                }
-                const net = val - empty;
-                if (net <= 0) {
-                    return res.status(400).json({
-                        message: `Loaded weight (${val}kg) must be greater than empty weight (${empty}kg).`,
-                    });
-                }
-                weightUpdate.netKg = Math.round(net * 100) / 100;
-            }
-        }
-
-        // v2 loaded-weighbridge stage ALSO captures PRELIMINARY stream-wise
+        // v2 loaded-weighbridge stage captures PRELIMINARY stream-wise
         // weights (the familiar per-stream entry). These are an estimate — the
         // facility re-segregates and the final weights are confirmed at Closure.
         let prelimLineItems = null;
@@ -563,7 +534,6 @@ const updatePickupStatus = async (req, res) => {
         pickup.evidence = pickup.evidence || [];
         pickup.evidence.push(evidenceEntry);
         pickup.status = newStatus;
-        if (weightUpdate) pickup.vehicleWeights = weightUpdate;
         if (prelimLineItems) {
             const now = new Date();
             const actor = { userType: me.userType, userId: me.userId, name: me.name };

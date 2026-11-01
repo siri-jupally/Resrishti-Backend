@@ -32,7 +32,6 @@ const makePickup = (over = {}) => Pickup.create({
     supervisor: { userType: "Employee", userId: agent._id, name: agent.name },
     lineItems: [{ stream: "plastic", qtyKg: 500 }, { stream: "paper", qtyKg: 300 }],
     totalKg: 800, weightsStatus: "preliminary",
-    vehicleWeights: { emptyKg: 1000, loadedKg: 1850, netKg: 850 },
     ...over,
 });
 const close = async (actorReqKey, actor, id, body = {}) => {

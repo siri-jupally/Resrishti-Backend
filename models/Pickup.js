@@ -267,12 +267,12 @@ const pickupSchema = new mongoose.Schema(
                 // then the explicit Closure (P2) sets 'closed'. Added additively;
                 // legacy (v1) pickups never use these.
                 "v2-departed",        // 1 vehicle started towards client
-                "v2-empty-weighed",   // 2 empty vehicle on weighbridge (+emptyKg)
+                "v2-empty-weighed",   // 2 empty vehicle photo
                 "v2-at-client",       // 3 empty vehicle at client location
                 "v2-loading",         // 4 loading started at client
                 "v2-loaded",          // 5 fully loaded vehicle at client
-                "v2-loaded-weighed",  // 6 fully loaded on weighbridge (+loadedKg → net)
-                "v2-at-facility",     // 7 vehicle reached GreenEarth facility
+                "v2-loaded-weighed",  // 6 stream-wise weights recorded (preliminary)
+                "v2-at-facility",     // 7 vehicle reached ReSrishti facility
                 "closed",             // Pickup Closed (Closure stage, P2)
             ],
         },
@@ -361,17 +361,6 @@ const pickupSchema = new mongoose.Schema(
         // Live GPS tracking shared with the client while the pickup is in the
         // field. See trackingSchema above and isTrackingLive() below.
         tracking: { type: trackingSchema, default: undefined },
-
-        // v2 pipeline only: empty & loaded VEHICLE weights from the weighbridge
-        // (stages 2 & 6). net = loaded − empty. Per the revamp decision these are
-        // a cross-check / evidence figure, NOT the source of truth for per-stream
-        // quantities — those are still entered per waste stream at Closure.
-        vehicleWeights: {
-            emptyKg: Number,
-            loadedKg: Number,
-            netKg: Number,
-            _id: false,
-        },
     },
     { timestamps: true }
 );
