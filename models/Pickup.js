@@ -232,6 +232,9 @@ const pickupSchema = new mongoose.Schema(
         requestedDate: { type: Date }, // when the client wants the pickup
         requestedStreams: [String],
         clientNotes: String,
+        // Set when this pickup was materialised from a recurring schedule
+        // (models/PickupSchedule) rather than requested one-off.
+        recurringScheduleId: { type: mongoose.Schema.Types.ObjectId, ref: "PickupSchedule", default: null, index: true },
 
         // Triage / lifecycle.
         status: {

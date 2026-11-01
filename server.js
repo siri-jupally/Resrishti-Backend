@@ -220,6 +220,8 @@ app.use("/api/client", require("./routes/clientPortalRoutes"));
 // Client portal pickup endpoints (Backend D). Mounted at a more specific
 // path than `/api/client` so Express resolves it first.
 app.use("/api/client/pickups", require("./routes/clientPortalPickupRoutes"));
+// Client recurring pickup schedules.
+app.use("/api/client/schedules", require("./routes/clientPortalScheduleRoutes"));
 
 // Client Management module — admin/coordinator pickup triage endpoints
 // (Phase 1, Chunk 2). Auth via protectTriage (Admin OR Manager+canCoordinate).
@@ -428,5 +430,13 @@ try {
   require("./services/statsJob").startStatsJob();
 } catch (err) {
   console.error("Failed to start stats job:", err.message);
+}
+
+// Materialise recurring client pickups — runs once on boot then daily. Each
+// due occurrence becomes a normal "requested" pickup the coordinator accepts.
+try {
+  require("./services/recurringPickupJob").startRecurringPickupJob();
+} catch (err) {
+  console.error("Failed to start recurring pickup job:", err.message);
 }
 // test change

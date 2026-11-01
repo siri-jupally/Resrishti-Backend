@@ -69,6 +69,10 @@ const maskPickupForClient = (doc) => {
             ? { active: true, mode: p.tracking.mode }
             : { active: false };
     }
+    // Surface only whether this pickup came from a recurring schedule, not the
+    // schedule id itself.
+    p.isRecurring = !!p.recurringScheduleId;
+    delete p.recurringScheduleId;
     return p;
 };
 
