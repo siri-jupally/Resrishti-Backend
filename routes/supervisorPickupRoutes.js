@@ -57,6 +57,8 @@ const factory = (roleAuth, opts = {}) => {
     // file off the `weighbridgePhoto` field. lineItems arrives as a JSON
     // string in req.body (multipart can't carry arrays natively).
     r.post("/:id/waste-data", roleAuth, ctrl.wasteDataUpload, ctrl.recordWasteData);
+    // v2 closure (JSON): confirm final stream weights and mark the pickup closed.
+    r.post("/:id/close", roleAuth, ctrl.closeRun);
     return r;
 };
 

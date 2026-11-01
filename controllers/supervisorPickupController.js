@@ -1224,6 +1224,144 @@ const stopTracking = async (req, res) => {
     }
 };
 
+// ==================== PICKUP CLOSURE (v2) ====================
+//
+// POST /api/{role}/my-pickups/:id/close   { lineItems?, isPartial?, partialReason? }
+//
+// Closes a v2 pickup at the facility: review/edit the final stream weights
+// (post-segregation) and confirm them, then mark the pickup `closed`.
+// Deliberately INDEPENDENT of certificates — no cert is created here (that is a
+// separate, explicit step). If lineItems is omitted the existing preliminary
+// weights are confirmed as-is.
+//
+// Authorization: the assigned supervisor, OR an admin, OR a coordinator
+// (canCoordinate) — the office that receives the waste.
+const closeRun = async (req, res) => {
+    try {
+        const me = getCurrentUser(req);
+        if (!me) return res.status(401).json({ message: "Not authorized" });
+
+        const pickup = await Pickup.findById(req.params.id);
+        if (!pickup) return res.status(404).json({ message: "Pickup not found" });
+
+        // Closure is a v2 concept; legacy pickups finish via waste-data.
+        if (Pickup.isLegacyPipeline(pickup)) {
+            return res.status(409).json({ message: "This pickup uses the legacy flow and is not closed this way." });
+        }
+
+        const isAdmin = me.userType === "Admin";
+        const isCoordinator = !!(me.doc && me.doc.canCoordinate);
+        const canSup = await assertCanSupervise(me);
+        const assignedId = pickup.supervisor && pickup.supervisor.userId;
+        const isOwner = canSup && assignedId && assignedId.toString() === me.userId.toString();
+        if (!isOwner && !isAdmin && !isCoordinator) {
+            return res.status(403).json({ message: "Only the assigned supervisor, a coordinator or an admin can close a pickup." });
+        }
+
+        if (pickup.status !== "v2-at-facility") {
+            return res.status(409).json({
+                message: `A pickup can only be closed once it has reached the facility (current: '${pickup.status}').`,
+                allowedFromStatus: ["v2-at-facility"],
+            });
+        }
+
+        // Final stream weights — edited at closure, or confirm the preliminary set.
+        let raw = req.body.lineItems;
+        if (typeof raw === "string") {
+            try { raw = JSON.parse(raw); }
+            catch { return res.status(400).json({ message: "lineItems must be a JSON-stringified array" }); }
+        }
+        if (!Array.isArray(raw) || raw.length === 0) {
+            raw = (pickup.lineItems || []).map((li) => ({ stream: li.stream, qtyKg: li.qtyKg }));
+        }
+        if (!Array.isArray(raw) || raw.length === 0) {
+            return res.status(400).json({ message: "No stream weights to confirm." });
+        }
+
+        const validStreams = new Set(await require("../utils/wasteCategories").allStreamKeys());
+        const merged = new Map();
+        for (let i = 0; i < raw.length; i += 1) {
+            const item = raw[i] || {};
+            const stream = String(item.stream || "").trim();
+            const qtyKg = Number(item.qtyKg);
+            if (!stream || !validStreams.has(stream)) {
+                return res.status(400).json({ message: `lineItems[${i}].stream must be one of: ${[...validStreams].join(", ")}` });
+            }
+            if (!Number.isFinite(qtyKg) || qtyKg <= 0) {
+                return res.status(400).json({ message: `lineItems[${i}].qtyKg must be a positive number` });
+            }
+            if (merged.has(stream)) merged.get(stream).qtyKg += qtyKg;
+            else merged.set(stream, { stream, qtyKg, notes: item.notes ? String(item.notes) : undefined });
+        }
+        const items = [...merged.values()];
+        const total = Math.round(items.reduce((a, li) => a + li.qtyKg, 0) * 100) / 100;
+        if (total <= 0) {
+            return res.status(400).json({ message: "Total waste cannot be zero. Cancel the pickup if nothing was collected." });
+        }
+
+        const now = new Date();
+        const actor = { userType: me.userType, userId: me.userId, name: me.name };
+        const prevTotal = pickup.totalKg || 0;
+
+        const isPartial = req.body.isPartial === true || String(req.body.isPartial) === "true";
+        const partialReason = String(req.body.partialReason || "").trim();
+        if (isPartial && !partialReason) {
+            return res.status(400).json({ message: "partialReason is required for a partial collection." });
+        }
+
+        pickup.lineItems = items;
+        pickup.totalKg = total;
+        pickup.weightsStatus = "confirmed";
+        pickup.weightsConfirmedAt = now;
+        pickup.weightsConfirmedBy = actor;
+        pickup.wasteDataEnteredAt = pickup.wasteDataEnteredAt || now;
+        pickup.wasteDataEnteredBy = pickup.wasteDataEnteredBy || actor;
+        pickup.isPartial = isPartial;
+        pickup.partialReason = isPartial ? partialReason : undefined;
+        pickup.wasteDataHistory = pickup.wasteDataHistory || [];
+        pickup.wasteDataHistory.push({
+            lineItems: items.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+            totalKg: total,
+            previousTotalKg: prevTotal,
+            reason: isPartial ? `Final weights confirmed at closure — partial: ${partialReason}` : "Final weights confirmed at closure",
+            at: now,
+            by: actor,
+        });
+        pickup.status = "closed";
+        pickup.evidence = pickup.evidence || [];
+        pickup.evidence.push({ status: "closed", at: now, by: actor, notes: "Pickup closed" });
+
+        // Live tracking goes dark on closure if it was still open.
+        if (pickup.tracking && pickup.tracking.mode && !pickup.tracking.endedAt) {
+            pickup.tracking.endedAt = now;
+        }
+
+        await pickup.save();
+
+        try {
+            getIo().to(`pickup_${pickup._id}`).emit("pickup:status-updated", { pickupId: pickup._id, status: "closed" });
+        } catch (e) { console.error("Socket emit error (close):", e.message || e); }
+
+        // Best-effort client push: the collection is complete.
+        try {
+            const client = await Client.findById(pickup.client).select("pushSubscription").lean();
+            if (client && client.pushSubscription) {
+                await notifyIfEnabled("pickup", client.pushSubscription, {
+                    title: "Pickup complete",
+                    body: `Your waste collection is complete — ${total} kg recorded.`,
+                    icon: "/android-chrome-512x512.png",
+                    data: { url: `/client/pickups/${pickup._id}` },
+                });
+            }
+        } catch (e) { console.error("Client push error (close):", e.message || e); }
+
+        return res.json(pickup);
+    } catch (err) {
+        console.error("closeRun error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listMyPickups,
     listWasteCategories,
@@ -1234,6 +1372,7 @@ module.exports = {
     setTracking,
     pingTracking,
     stopTracking,
+    closeRun,
     // Prefer `uploadEvidence` in routes — it turns multer failures into clear
     // 400s. `upload` stays exported for anything that wants the raw middleware.
     uploadEvidence,
