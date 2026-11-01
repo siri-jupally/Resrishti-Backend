@@ -47,8 +47,9 @@ const multer = require("multer");
 const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
 // Live-tracking window + cap live on the model so the client controller and
-// this one agree on exactly when tracking is visible.
-const { TRACKING_ACTIVE_STATUSES, MAX_TRACKING_POINTS } = Pickup;
+// this one agree on exactly when tracking is visible. V2_FIELD_STATUSES is the
+// ordered list of the seven new pipeline stages.
+const { TRACKING_ACTIVE_STATUSES, MAX_TRACKING_POINTS, V2_FIELD_STATUSES } = Pickup;
 const Client = require("../models/Client");
 // Shared pickup-creation path, so a staff-created pickup is identical to a
 // client self-requested one (same validation, status, snapshots, notifications).
@@ -217,6 +218,23 @@ const CLIENT_NOTIFICATION = {
         title: "Waste weighed",
         body: "Your waste has been weighed. Certificate coming soon.",
     },
+    // v2 client-meaningful stages (intermediate v2 stages stay quiet).
+    "v2-departed": {
+        title: "Pickup on the way",
+        body: "Your pickup team is on the way.",
+    },
+    "v2-at-client": {
+        title: "Pickup team arrived",
+        body: "Your pickup team has arrived at your location.",
+    },
+    "v2-loaded": {
+        title: "Waste collected",
+        body: "Your waste has been collected. It is on its way to our facility.",
+    },
+    "v2-at-facility": {
+        title: "Arrived at facility",
+        body: "Your waste has arrived at the Resrishti facility.",
+    },
     "failed": {
         title: "Pickup could not be completed",
         body: "We couldn't complete your pickup. Our team will be in touch.",
@@ -226,6 +244,29 @@ const CLIENT_NOTIFICATION = {
         body: "Our team couldn't collect your waste. Our team will be in touch.",
     },
 };
+
+// --- v2 (7-stage) state machine — used when pipelineVersion === 2 ---
+// Order: departed → empty-weighed → at-client → loading → loaded →
+// loaded-weighed → at-facility. Closure (→ 'closed') is a separate P2 endpoint.
+const ALLOWED_NEXT_V2 = {
+    "accepted": ["v2-departed", "postponed", "failed", "no-show"],
+    "scheduled": ["v2-departed", "postponed", "failed", "no-show"],
+    "postponed": ["scheduled"],
+    "v2-departed": ["v2-empty-weighed", "failed", "no-show"],
+    "v2-empty-weighed": ["v2-at-client", "failed", "no-show"],
+    "v2-at-client": ["v2-loading", "failed", "no-show"],
+    "v2-loading": ["v2-loaded", "failed", "no-show"],
+    "v2-loaded": ["v2-loaded-weighed", "failed", "no-show"],
+    "v2-loaded-weighed": ["v2-at-facility", "failed", "no-show"],
+    "v2-at-facility": [], // Closure handled by the P2 closure endpoint, not here.
+};
+
+// Every v2 field stage requires a photo (vs the 3 operational captures in v1).
+const PHOTO_REQUIRED_FOR_V2 = new Set(V2_FIELD_STATUSES);
+
+// v2 stages that also capture a weighbridge vehicle weight.
+const V2_EMPTY_WEIGH = "v2-empty-weighed";   // body.emptyKg
+const V2_LOADED_WEIGH = "v2-loaded-weighed"; // body.loadedKg → net = loaded − empty
 
 /**
  * Normalize the authenticated principal regardless of which auth middleware ran.
@@ -366,8 +407,16 @@ const updatePickupStatus = async (req, res) => {
             return res.status(403).json({ message: "You are not the assigned supervisor for this pickup" });
         }
 
+        // State machine + photo rules depend on the pipeline version. Legacy
+        // (v1) pickups keep the 3-photo flow; v2 pickups run the 7-stage flow
+        // where every field stage requires a photo. Grandfathering = we branch
+        // here, never rewrite a pickup's version.
+        const legacy = Pickup.isLegacyPipeline(pickup);
+        const allowedMap = legacy ? ALLOWED_NEXT : ALLOWED_NEXT_V2;
+        const photoRequired = legacy ? PHOTO_REQUIRED_FOR : PHOTO_REQUIRED_FOR_V2;
+
         // State-machine guard.
-        const allowed = ALLOWED_NEXT[pickup.status] || [];
+        const allowed = allowedMap[pickup.status] || [];
         if (!allowed.includes(newStatus)) {
             return res.status(409).json({
                 message: `Invalid transition from ${pickup.status} to ${newStatus}`,
@@ -386,11 +435,43 @@ const updatePickupStatus = async (req, res) => {
         // Photo requirement — for the field-evidence statuses we need at least
         // one image. Accepts `photos[]` (current) or `photo` (older builds).
         const files = evidenceFilesFrom(req);
-        const needsPhoto = PHOTO_REQUIRED_FOR.has(newStatus);
+        const needsPhoto = photoRequired.has(newStatus);
         if (needsPhoto && files.length === 0) {
             return res.status(400).json({
                 message: `Photo evidence is required for status '${newStatus}'`,
             });
+        }
+
+        // v2 weighbridge stages capture a vehicle weight (cross-check only, not
+        // the per-stream source of truth). Validate BEFORE uploading photos so a
+        // bad/missing weight fails fast without leaving an orphan image.
+        let weightUpdate = null;
+        if (!legacy && (newStatus === V2_EMPTY_WEIGH || newStatus === V2_LOADED_WEIGH)) {
+            const key = newStatus === V2_EMPTY_WEIGH ? "emptyKg" : "loadedKg";
+            const val = Number(req.body[key]);
+            if (!Number.isFinite(val) || val <= 0) {
+                return res.status(400).json({
+                    message: `${key} (a positive number) is required for '${newStatus}'.`,
+                });
+            }
+            const existing = (pickup.vehicleWeights && pickup.vehicleWeights.toObject
+                ? pickup.vehicleWeights.toObject() : pickup.vehicleWeights) || {};
+            weightUpdate = { ...existing, [key]: val };
+            if (newStatus === V2_LOADED_WEIGH) {
+                const empty = Number(existing.emptyKg);
+                if (!Number.isFinite(empty)) {
+                    return res.status(409).json({
+                        message: "Empty vehicle weight wasn't recorded at the empty-weighbridge stage; cannot compute net weight.",
+                    });
+                }
+                const net = val - empty;
+                if (net <= 0) {
+                    return res.status(400).json({
+                        message: `Loaded weight (${val}kg) must be greater than empty weight (${empty}kg).`,
+                    });
+                }
+                weightUpdate.netKg = Math.round(net * 100) / 100;
+            }
         }
 
         // Upload every image (postponed/scheduled may legitimately send none).
@@ -448,6 +529,7 @@ const updatePickupStatus = async (req, res) => {
         pickup.evidence = pickup.evidence || [];
         pickup.evidence.push(evidenceEntry);
         pickup.status = newStatus;
+        if (weightUpdate) pickup.vehicleWeights = weightUpdate;
         if (FIELD_TERMINAL.has(newStatus)) {
             pickup.failureReason = failureReason;
             evidenceEntry.notes = failureReason;

@@ -259,6 +259,20 @@ const pickupSchema = new mongoose.Schema(
                 // Both are terminal and both carry failureReason.
                 "failed",
                 "no-show",
+
+                // --- v2 pipeline (7-stage revamp; only pipelineVersion:2) ---
+                // Each is a photo-gated stage; order is departed → empty-weighed
+                // → at-client → loading → loaded → loaded-weighed → at-facility,
+                // then the explicit Closure (P2) sets 'closed'. Added additively;
+                // legacy (v1) pickups never use these.
+                "v2-departed",        // 1 vehicle started towards client
+                "v2-empty-weighed",   // 2 empty vehicle on weighbridge (+emptyKg)
+                "v2-at-client",       // 3 empty vehicle at client location
+                "v2-loading",         // 4 loading started at client
+                "v2-loaded",          // 5 fully loaded vehicle at client
+                "v2-loaded-weighed",  // 6 fully loaded on weighbridge (+loadedKg → net)
+                "v2-at-facility",     // 7 vehicle reached GreenEarth facility
+                "closed",             // Pickup Closed (Closure stage, P2)
             ],
         },
         rejectionReason: String,
@@ -326,6 +340,17 @@ const pickupSchema = new mongoose.Schema(
         // Live GPS tracking shared with the client while the pickup is in the
         // field. See trackingSchema above and isTrackingLive() below.
         tracking: { type: trackingSchema, default: undefined },
+
+        // v2 pipeline only: empty & loaded VEHICLE weights from the weighbridge
+        // (stages 2 & 6). net = loaded − empty. Per the revamp decision these are
+        // a cross-check / evidence figure, NOT the source of truth for per-stream
+        // quantities — those are still entered per waste stream at Closure.
+        vehicleWeights: {
+            emptyKg: Number,
+            loadedKg: Number,
+            netKg: Number,
+            _id: false,
+        },
     },
     { timestamps: true }
 );
@@ -362,11 +387,24 @@ const photosOf = (evidenceEntry) => {
 };
 
 /**
- * Statuses during which live tracking is shown to the client. Chosen window:
- * en-route through at-facility — it goes dark at 'weighed' and at any terminal
- * state. Mirrored on the frontend (lib/pickupStatus.js TRACKING_ACTIVE_STATUSES).
+ * The seven in-field v2 stages, in order (pipelineVersion:2). Shared by the
+ * state machine, photo-gating and tracking so they can't drift apart.
  */
-const TRACKING_ACTIVE_STATUSES = ["en-route", "at-client", "picked-up", "at-facility"];
+const V2_FIELD_STATUSES = [
+    "v2-departed", "v2-empty-weighed", "v2-at-client", "v2-loading",
+    "v2-loaded", "v2-loaded-weighed", "v2-at-facility",
+];
+
+/**
+ * Statuses during which live tracking is shown to the client. v1 window:
+ * en-route through at-facility; v2 window: every in-field stage. It goes dark
+ * once the pickup is weighed/closed or at any terminal state. Mirrored on the
+ * frontend (lib/pickupStatus.js TRACKING_ACTIVE_STATUSES).
+ */
+const TRACKING_ACTIVE_STATUSES = [
+    "en-route", "at-client", "picked-up", "at-facility",
+    ...V2_FIELD_STATUSES,
+];
 
 // Most GPS points we keep per pickup. At one point every ~10-15s a long pickup
 // stays well under this; the cap just bounds a stuck-sharing session.
@@ -417,6 +455,7 @@ const isClosedEquivalent = (statusOrPickup) => {
 module.exports = Pickup;
 module.exports.photosOf = photosOf;
 module.exports.TRACKING_ACTIVE_STATUSES = TRACKING_ACTIVE_STATUSES;
+module.exports.V2_FIELD_STATUSES = V2_FIELD_STATUSES;
 module.exports.MAX_TRACKING_POINTS = MAX_TRACKING_POINTS;
 module.exports.isTrackingLive = isTrackingLive;
 module.exports.isLegacyPipeline = isLegacyPipeline;
