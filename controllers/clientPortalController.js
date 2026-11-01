@@ -131,11 +131,12 @@ const getDashboard = async (req, res) => {
   try {
     const clientId = req.client._id;
 
-    // Pickups whose certs are issued or sent → these are the "diverted" totals
-    // that the client portal mirrors from the public stats methodology.
+    // Every COMPLETED pickup counts toward the "diverted" totals, regardless of
+    // whether a certificate was ever issued (P3 — impact decoupled from cert
+    // issuance). Mirrors the monthly Impact report + public-stats methodology.
     const eligiblePickups = await Pickup.find({
       client: clientId,
-      status: { $in: ["cert-issued", "cert-sent"] },
+      status: { $in: Pickup.CLOSED_EQUIVALENT_STATUSES },
     })
       .select("lineItems")
       .lean();

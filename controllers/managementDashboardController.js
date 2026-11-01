@@ -29,8 +29,14 @@ const { factorForStream, refreshCache, activeCategories } =
 const STAGES = {
     pending: ["requested"],
     scheduled: ["accepted", "scheduled", "postponed"],
-    inProgress: ["en-route", "at-client", "picked-up", "at-facility", "weighed"],
-    completed: ["processed", "cert-draft", "cert-issued", "cert-sent"],
+    inProgress: [
+        "en-route", "at-client", "picked-up", "at-facility", "weighed",
+        // v2 field stages (pipelineVersion:2)
+        "v2-departed", "v2-empty-weighed", "v2-at-client", "v2-loading",
+        "v2-loaded", "v2-loaded-weighed", "v2-at-facility",
+    ],
+    // v2 pickups complete at "closed" (Closure confirms the final weights).
+    completed: ["processed", "cert-draft", "cert-issued", "cert-sent", "closed"],
     failedOrCancelled: ["failed", "no-show", "cancelled", "rejected"],
 };
 

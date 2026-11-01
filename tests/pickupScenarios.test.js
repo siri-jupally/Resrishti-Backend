@@ -78,12 +78,16 @@ beforeEach(async () => {
     });
 });
 
+// These scenarios exercise the LEGACY (v1) flow (at-client → failed, weighed →
+// waste-data, etc.), so pin pipelineVersion to 1 — new pickups now default to
+// v2, whose state machine doesn't use the v1 statuses. A test can still override.
 const makePickup = (fields = {}) =>
     Pickup.create({
         pickupID: `PU-TEST-${Math.random().toString(16).slice(2, 8).toUpperCase()}`,
         client: client._id,
         clientNameSnapshot: client.name,
         status: "scheduled",
+        pipelineVersion: 1,
         supervisor: { userType: "Employee", userId: supervisorEmp._id, name: "Sup" },
         ...fields,
     });

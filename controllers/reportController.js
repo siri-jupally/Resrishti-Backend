@@ -74,6 +74,8 @@ const ELIGIBLE_PICKUP_STATUSES = [
     "cert-draft",
     "cert-issued",
     "cert-sent",
+    // v2 pickups complete at Closure, which confirms the final stream weights.
+    "closed",
 ];
 
 // ---------- helpers ----------------------------------------------------

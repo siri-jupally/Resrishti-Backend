@@ -449,12 +449,16 @@ const isLegacyPipeline = (pickup) => !pickup || (pickup.pipelineVersion ?? 1) !=
 /**
  * Statuses that mean "the collection is effectively complete — waste has been
  * recorded." This is the SINGLE SOURCE OF TRUTH for what counts as a closed /
- * completed pickup across reports, dashboards and public impact. It deliberately
- * mirrors reportController.ELIGIBLE_PICKUP_STATUSES today (NOT gated on cert
- * issuance). The v2 explicit "closed" status is added here when it lands (P1/P2),
- * and P3 re-points the cert-gated dashboards/public-stats onto this set.
+ * completed pickup across reports, dashboards and public impact, and is NOT
+ * gated on certificate issuance. It stays equal to
+ * reportController.ELIGIBLE_PICKUP_STATUSES (a drift-guard test enforces this).
+ *
+ * v1 completes at `processed` (and the cert-* stages that follow); v2 completes
+ * at `closed` (Closure confirms the final weights). As of P3 the client
+ * dashboard and public-stats job both count this set — impact reflects every
+ * completed pickup, whether or not a certificate was ever issued.
  */
-const CLOSED_EQUIVALENT_STATUSES = ["processed", "cert-draft", "cert-issued", "cert-sent"];
+const CLOSED_EQUIVALENT_STATUSES = ["processed", "cert-draft", "cert-issued", "cert-sent", "closed"];
 
 /** True when a pickup is complete enough to count toward impact / reports. */
 const isClosedEquivalent = (statusOrPickup) => {

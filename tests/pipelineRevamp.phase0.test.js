@@ -55,8 +55,8 @@ describe("Phase 0 — pipeline revamp migration safety net", () => {
             expect([...Pickup.CLOSED_EQUIVALENT_STATUSES].sort())
                 .toEqual([...ELIGIBLE_PICKUP_STATUSES].sort());
         });
-        it("isClosedEquivalent true for completed-ish statuses", () => {
-            for (const s of ["processed", "cert-draft", "cert-issued", "cert-sent"]) {
+        it("isClosedEquivalent true for completed-ish statuses (incl. v2 'closed')", () => {
+            for (const s of ["processed", "cert-draft", "cert-issued", "cert-sent", "closed"]) {
                 expect(Pickup.isClosedEquivalent(s)).toBe(true);
             }
         });
