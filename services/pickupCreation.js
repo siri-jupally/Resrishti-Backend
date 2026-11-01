@@ -95,6 +95,10 @@ async function createPickupForClient({
     // Only honoured when createdByActor is set: a client requesting their own
     // pickup can never book it in the past, however the request is crafted.
     allowPastDate = false,
+    // Set when the recurring-pickup job materialises an occurrence — stamped on
+    // the doc at creation so the (recurringScheduleId, requestedDate) unique
+    // index enforces one-pickup-per-occurrence atomically.
+    recurringScheduleId = null,
 }) {
     if (!client || !client._id) {
         throw new PickupCreationError(400, "A valid client is required");
@@ -218,7 +222,11 @@ async function createPickupForClient({
                 requestedDate: rd,
                 requestedStreams,
                 clientNotes,
+                // Every NEW pickup runs the v2 (7-stage) flow. Set explicitly —
+                // the model default is 1 so pre-existing rows stay legacy.
+                pipelineVersion: 2,
                 status: selfAssign ? "accepted" : "requested",
+                ...(recurringScheduleId ? { recurringScheduleId } : {}),
                 ...(evidence ? { evidence } : {}),
             };
             if (selfAssign) {

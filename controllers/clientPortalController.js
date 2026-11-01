@@ -281,6 +281,9 @@ const downloadMyCertificate = async (req, res) => {
   try {
     const clientId = req.client._id;
     const certId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(certId)) {
+      return res.status(404).json({ message: "Certificate not found" });
+    }
 
     const cert = await Certificate.findOne({
       _id: certId,

@@ -26,13 +26,13 @@ const LEGACY_STATUSES = [
 
 describe("Phase 0 — pipeline revamp migration safety net", () => {
     describe("pipelineVersion field", () => {
-        it("defaults a newly-created pickup to 2 (the v2 flow is now live)", () => {
+        it("defaults to 1 (legacy) — so a field-less existing row is grandfathered; new pickups are set to 2 at creation", () => {
             const p = new Pickup({
                 pickupID: "PU-TEST-0001",
                 client: new mongoose.Types.ObjectId(),
                 status: "requested",
             });
-            expect(p.pipelineVersion).toBe(2);
+            expect(p.pipelineVersion).toBe(1);
         });
         it("only accepts versions 1 or 2", () => {
             expect(Pickup.schema.path("pipelineVersion").options.enum).toEqual([1, 2]);

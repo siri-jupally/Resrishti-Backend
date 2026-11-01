@@ -60,7 +60,10 @@ const ghgRowSchema = new mongoose.Schema(
 // Per-material row of the impact breakdown.
 const impactRowSchema = new mongoose.Schema(
     {
+        // calcImpact is now per-STREAM (was per-material); keep `material` for
+        // old rows and add `stream`/`co2` so nothing is stripped on save.
         material: String,
+        stream: String,
         qtyKg: Number,
         energy: Number,
         oil: Number,
@@ -68,6 +71,7 @@ const impactRowSchema = new mongoose.Schema(
         air: Number,
         water: Number,
         trees: Number,
+        co2: Number,
         _id: false,
     },
     { _id: false }
@@ -131,6 +135,11 @@ const reportSchema = new mongoose.Schema(
             airPollutants: Number,
             oilSaved: Number,
             landfillSaved: Number,
+            // CO2 is a first-class impact metric now — without this field
+            // Mongoose (strict) silently drops it on save and the issued PDF
+            // prints CO2e = 0. unmappedKg drives the reviewer warning.
+            co2Saved: Number,
+            unmappedKg: Number,
             rows: [impactRowSchema],
             _id: false,
         },

@@ -90,6 +90,31 @@ const seedCoreCategories = async () => {
     return missing.length;
 };
 
+/**
+ * One-time backfill of the shipped impact factors onto core rows that predate
+ * those fields. Only touches a row whose SIX impact factors are all unset/zero
+ * (so an admin's edits are never clobbered), and only seeds streams that have a
+ * shipped non-zero figure (plastic/paper/ewaste/battery). Idempotent — once a
+ * row has non-zero factors the filter no longer matches. This is what stops the
+ * client-facing Impact report rendering all-zeros on an already-seeded prod DB.
+ */
+const backfillImpactFactors = async () => {
+    let changed = 0;
+    for (const core of CORE_CATEGORIES) {
+        const hasSeed = IMPACT_METRIC_FIELDS.some((f) => (core[f] || 0) > 0);
+        if (!hasSeed) continue;
+        const allUnsetOrZero = {
+            key: core.key,
+            $and: IMPACT_METRIC_FIELDS.map((f) => ({ $or: [{ [f]: { $exists: false } }, { [f]: 0 }, { [f]: null }] })),
+        };
+        const set = {};
+        for (const f of IMPACT_METRIC_FIELDS) set[f] = core[f] || 0;
+        const r = await WasteCategory.updateOne(allUnsetOrZero, { $set: set });
+        changed += r.modifiedCount || 0;
+    }
+    return changed;
+};
+
 /** Reload the in-memory list from Mongo. Safe to call often. */
 const refreshCache = async () => {
     const rows = await WasteCategory.find({}).sort({ sortOrder: 1, label: 1 }).lean();
@@ -100,6 +125,7 @@ const refreshCache = async () => {
 /** Seed then load — call once after the Mongo connection opens. */
 const initWasteCategories = async () => {
     const seeded = await seedCoreCategories();
+    await backfillImpactFactors();
     await refreshCache();
     return seeded;
 };

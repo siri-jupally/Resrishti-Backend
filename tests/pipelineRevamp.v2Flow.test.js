@@ -148,6 +148,22 @@ describe("Phase 1 — v2 7-stage workflow", () => {
         expect(res.body.message).toMatch(/Photo evidence is required/);
     });
 
+    it("refuses to mark a loaded/weighed v2 pickup failed (collected waste can't be abandoned)", async () => {
+        for (const from of ["v2-loaded", "v2-loaded-weighed"]) {
+            const p = await makePickup(2, from);
+            const failRes = await advance(p._id, "failed", { body: { reason: "changed mind" } });
+            expect(failRes.statusCode).toBe(409);
+            const noShowRes = await advance(p._id, "no-show", { body: { reason: "x" } });
+            expect(noShowRes.statusCode).toBe(409);
+        }
+    });
+
+    it("still allows failed/no-show before the load is collected (e.g. v2-at-client)", async () => {
+        const p = await makePickup(2, "v2-at-client");
+        const res = await advance(p._id, "failed", { body: { reason: "gate locked and waste not ready" } });
+        expect(res.statusCode).toBe(200);
+    });
+
     it("rejects an invalid v2 transition (skipping a stage)", async () => {
         const p = await makePickup(2, "scheduled");
         const res = await advance(p._id, "v2-at-client"); // skips departed/empty-weighed
@@ -175,19 +191,15 @@ describe("Phase 1 — v1 pickups are grandfathered (unchanged)", () => {
         expect(res.statusCode).toBe(409);
     });
 
-    it("real legacy rows are grandfathered by the migration's explicit pipelineVersion:1, not by a missing field", async () => {
-        // Now that the schema default is 2, a row whose field is genuinely
-        // absent (e.g. inserted raw) picks up that default on hydration and
-        // runs the v2 flow — so a v1-only transition is rejected...
+    it("a field-less row (created before the field existed) is grandfathered to v1 by the default", async () => {
+        // The schema default is 1, so a row whose pipelineVersion is genuinely
+        // absent hydrates to 1 → treated as legacy → the v1 flow applies with
+        // no migration needed. This is what makes the deploy safe for every
+        // existing in-flight prod pickup.
         const p = await makePickup(2, "scheduled");
         await Pickup.collection.updateOne({ _id: p._id }, { $unset: { pipelineVersion: "" } });
-        const asV2 = await advance(p._id, "en-route"); // v1-only transition
-        expect(asV2.statusCode).toBe(409);
-        // ...which is exactly why the migration backfills every existing row to
-        // an explicit 1. Once it is 1, the legacy flow applies.
-        await Pickup.collection.updateOne({ _id: p._id }, { $set: { pipelineVersion: 1 } });
-        const asV1 = await advance(p._id, "en-route");
-        expect(asV1.statusCode).toBe(200);
+        const res = await advance(p._id, "en-route"); // v1 transition
+        expect(res.statusCode).toBe(200);
         expect((await Pickup.findById(p._id)).status).toBe("en-route");
     });
 });

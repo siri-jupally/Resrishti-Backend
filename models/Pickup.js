@@ -196,10 +196,13 @@ const pickupSchema = new mongoose.Schema(
         //       7-stage revamp. Existing rows are backfilled to 1; a MISSING value
         //       is also treated as 1 (see isLegacyPipeline + migrations/0001).
         //   2 = new 7-stage flow + explicit Closure (lands in Phase 1).
-        // NEW pickups default to 2 (the 7-stage flow is now built). Existing rows
-        // were backfilled to 1 and are grandfathered. Never rewrite this on an
-        // existing pickup.
-        pipelineVersion: { type: Number, default: 2, enum: [1, 2], index: true },
+        // The default is 1 on PURPOSE: a hydrated (non-lean) doc with no
+        // pipelineVersion field — i.e. every pickup created before this field
+        // existed — must read as legacy/v1 and stay on the old flow. (Mongoose
+        // applies the schema default on hydration, so a default of 2 would
+        // silently mis-route every existing pickup into the v2 state machine.)
+        // NEW pickups are set to 2 EXPLICITLY at creation (services/pickupCreation).
+        pipelineVersion: { type: Number, default: 1, enum: [1, 2], index: true },
 
         client: {
             type: mongoose.Schema.Types.ObjectId,
@@ -376,6 +379,15 @@ const pickupSchema = new mongoose.Schema(
 pickupSchema.index({ client: 1, status: 1 });
 pickupSchema.index({ status: 1, scheduledDate: 1 });
 pickupSchema.index({ "supervisor.userId": 1, status: 1 });
+// At most ONE pickup per (recurring schedule, occurrence date) — the DB-level
+// guarantee behind the generation job's idempotency, so overlapping runs
+// (create-on-create vs the daily job, resume races, multiple instances) can't
+// double-create. Partial so it never constrains one-off (non-recurring) pickups,
+// which all carry recurringScheduleId = null.
+pickupSchema.index(
+    { recurringScheduleId: 1, requestedDate: 1 },
+    { unique: true, partialFilterExpression: { recurringScheduleId: { $type: "objectId" } } }
+);
 
 const Pickup = mongoose.model("Pickup", pickupSchema);
 

@@ -120,4 +120,27 @@ describe("Phase 4 — issuing/sending a v2 cert keeps the pickup 'closed'", () =
         expect((await Certificate.findById(certId)).status).toBe("sent");
         expect((await Pickup.findById(p._id)).status).toBe("closed");
     });
+
+    it("revising a SENT v2 cert keeps the pickup 'closed' (never strands it in cert-draft)", async () => {
+        const p = await makePickup();
+        const certId = (await generate(p._id)).body._id;
+        await ctrl.issueCertificate({ admin, params: { id: String(certId) }, body: {} }, mockRes());
+        await ctrl.sendCertificate({ admin, params: { id: String(certId) }, body: {} }, mockRes());
+
+        const revRes = mockRes();
+        await ctrl.reviseCertificate({ admin, params: { id: String(certId) }, body: {} }, revRes);
+        expect(revRes.statusCode).toBe(200);
+        // old cert superseded, a new draft exists, and the pickup stays closed
+        expect((await Certificate.findById(certId)).status).toBe("superseded");
+        const fresh = await Pickup.findById(p._id);
+        expect(fresh.status).toBe("closed");
+    });
+
+    it("concurrent generate makes only ONE live cert for a closed pickup", async () => {
+        const p = await makePickup();
+        const [a, b] = await Promise.all([generate(p._id), generate(p._id)]);
+        const codes = [a.statusCode, b.statusCode].sort();
+        expect(codes).toEqual([201, 409]);                 // one wins, one is refused
+        expect(await Certificate.countDocuments({ pickup: p._id })).toBe(1);
+    });
 });

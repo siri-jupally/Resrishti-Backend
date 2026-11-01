@@ -37,6 +37,18 @@ describe("calcCod — bucket rollup", () => {
         expect(res.totalKg).toBe(0);
         expect(res.pickupCount).toBe(0);
     });
+
+    it("folds a bucket outside the CoD template (hazardous) into other-dry so rows reconcile with the total", () => {
+        const hazBucket = (s) => (s === "biohaz" ? "hazardous" : "other-dry");
+        const res = calcCod([{ lineItems: [{ stream: "biohaz", qtyKg: 40 }] }], hazBucket);
+        expect(res.totalKg).toBe(40);
+        // no "hazardous" row exists; its mass must appear in other-dry
+        expect(res.rows.find((r) => r.key === "hazardous")).toBeUndefined();
+        expect(res.rows.find((r) => r.key === "other-dry").qtyKg).toBe(40);
+        // the printed rows must sum to the printed total
+        const rowSum = res.rows.reduce((a, r) => a + r.qtyKg, 0);
+        expect(rowSum).toBe(res.totalKg);
+    });
 });
 
 describe("reportController — generate a monthly CoD report", () => {
@@ -77,7 +89,7 @@ describe("reportController — generate a monthly CoD report", () => {
         expect(res.statusCode).toBe(201);
         const report = res.body.report;
         expect(report.type).toBe("cod");
-        expect(report.reportNumber).toMatch(/^CoD-\d{4}-\d{4}$/);
+        expect(report.reportNumber).toMatch(/^MCD-\d{4}-\d{4}$/);
         expect(report.status).toBe("draft");
         expect(report.codSnapshot.totalKg).toBe(420);
         expect(report.codSnapshot.rows.find((r) => r.key === "plastic").qtyKg).toBe(300);

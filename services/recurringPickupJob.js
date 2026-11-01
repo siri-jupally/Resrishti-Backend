@@ -32,7 +32,12 @@ const ymd = (d) =>
  * auto-completes the schedule once its endDate has passed. Safe to call again
  * (e.g. right after a client creates a schedule, to produce the first pickup).
  */
-const generateDueForSchedule = async (schedule, { now = new Date() } = {}) => {
+const generateDueForSchedule = async (scheduleArg, { now = new Date() } = {}) => {
+    if (!scheduleArg) return 0;
+    // Re-read the live row: the schedule may have been paused/cancelled between
+    // when runRecurringPickups snapshotted the list and now, so never generate
+    // (or rewrite bookkeeping) against a stale "active" copy.
+    const schedule = await PickupSchedule.findById(scheduleArg._id);
     if (!schedule || schedule.status !== "active") return 0;
     const today = atMidnight(now);
     const horizon = addDays(today, LEAD_DAYS);
@@ -61,33 +66,47 @@ const generateDueForSchedule = async (schedule, { now = new Date() } = {}) => {
             break;
         }
 
-        // Never create two pickups for the same schedule + occurrence date.
+        // Fast-path: skip occurrences already generated (avoids wasting a
+        // pickupID on a create that the unique index would reject).
         const dup = await Pickup.exists({
             recurringScheduleId: schedule._id,
             requestedDate: { $gte: occ, $lt: addDays(occ, 1) },
         });
+        let madeOne = false;
         if (!dup) {
             try {
-                const pickup = await createPickupForClient({
+                // recurringScheduleId is set AT creation so the unique
+                // (recurringScheduleId, requestedDate) index enforces
+                // one-per-occurrence even under concurrent runs.
+                await createPickupForClient({
                     client,
                     requestedDate: ymd(occ),
                     requestedStreams: schedule.requestedStreams,
                     clientNotes: schedule.clientNotes,
                     siteId: schedule.site ? String(schedule.site) : undefined,
+                    recurringScheduleId: schedule._id,
                 });
-                await Pickup.updateOne({ _id: pickup._id }, { $set: { recurringScheduleId: schedule._id } });
+                madeOne = true;
                 created += 1;
             } catch (err) {
-                // Leave lastGeneratedDate untouched so the next run retries.
-                console.error(`Recurring gen failed (schedule ${schedule._id}, ${ymd(occ)}):`, err.message);
-                break;
+                if (err && err.code === 11000) {
+                    // Another path generated this occurrence first — benign; just advance.
+                } else {
+                    // Any other failure (e.g. a stream later deactivated) is
+                    // likely PERMANENT for this occurrence. SKIP it (advance
+                    // past) rather than break — one bad occurrence must never
+                    // stall all future pickups for the schedule.
+                    console.error(`Recurring gen failed (schedule ${schedule._id}, ${ymd(occ)}): ${err.message} — skipping this occurrence`);
+                }
             }
         }
 
         const next = nextOccurrenceAfter(schedule.cadence, schedule.startDate, occ);
+        // Guard bookkeeping on status:"active" so a pause mid-run can't rewrite
+        // a paused schedule's nextOccurrence.
         await PickupSchedule.updateOne(
-            { _id: schedule._id },
-            { $set: { lastGeneratedDate: occ, nextOccurrence: next }, $inc: { generatedCount: dup ? 0 : 1 } }
+            { _id: schedule._id, status: "active" },
+            { $set: { lastGeneratedDate: occ, nextOccurrence: next }, $inc: { generatedCount: madeOne ? 1 : 0 } }
         );
         schedule.lastGeneratedDate = occ; // keep local copy in sync for the loop
         fromDate = addDays(occ, 1);

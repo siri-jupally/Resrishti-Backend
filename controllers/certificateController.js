@@ -764,13 +764,18 @@ const reviseCertificate = async (req, res) => {
         try {
             const pkup = await Pickup.findById(oldCert.pickup);
             if (pkup) {
+                // v1 mirrors the cert lifecycle onto pickup.status; v2 pickups
+                // stay 'closed' (certs are decoupled) — same guard as issue/send,
+                // otherwise a revised v2 cert strands the pickup in cert-draft.
+                const legacy = Pickup.isLegacyPipeline(pkup);
                 pkup.certificate = newCert._id;
-                pkup.status = "cert-draft";
+                if (legacy) pkup.status = "cert-draft";
                 pkup.evidence = pkup.evidence || [];
                 pkup.evidence.push({
-                    status: "cert-draft",
+                    status: legacy ? "cert-draft" : pkup.status,
                     at: new Date(),
                     by: actorFromReq(req),
+                    notes: legacy ? undefined : `Certificate ${newCert.certNumber} revised (rev ${newCert.revision})`,
                 });
                 await pkup.save();
 
@@ -778,7 +783,7 @@ const reviseCertificate = async (req, res) => {
                     const io = getIo();
                     io.to(`pickup_${pkup._id}`).emit("pickup:status-updated", {
                         pickupId: pkup._id,
-                        status: "cert-draft",
+                        status: pkup.status,
                         certificateId: newCert._id,
                         supersededId: oldCert._id,
                     });
@@ -1028,23 +1033,34 @@ const generateCertificateForPickup = async (req, res) => {
             return res.status(500).json({ message: "Failed to draft certificate." });
         }
 
-        // Link the cert but DON'T move the pickup out of 'closed' — the cert has
-        // its own lifecycle from here. Record the milestone on the evidence log.
+        // Link the cert ATOMICALLY so two concurrent generate calls can't both
+        // succeed and leave an orphan cert for the same pickup. Claim only if
+        // pickup.certificate is still what we read (null, or a cancelled/
+        // superseded prior id). Pickup stays 'closed' — the cert has its own
+        // lifecycle. If another call won the race, roll back our orphan cert.
         const actor = actorFromReq(req);
-        pickup.certificate = cert._id;
-        pickup.evidence = pickup.evidence || [];
-        pickup.evidence.push({
-            status: pickup.status, // stays 'closed'
-            at: new Date(),
-            by: actor,
-            notes: `Certificate ${certNumber} drafted`,
-        });
-        await pickup.save();
+        const priorCert = pickup.certificate || null;
+        const claimed = await Pickup.findOneAndUpdate(
+            { _id: pickup._id, certificate: priorCert },
+            {
+                $set: { certificate: cert._id },
+                $push: { evidence: { status: pickup.status, at: new Date(), by: actor, notes: `Certificate ${certNumber} drafted` } },
+            },
+            { new: true }
+        );
+        if (!claimed) {
+            await Certificate.deleteOne({ _id: cert._id }).catch(() => {});
+            const fresh = await Pickup.findById(pickup._id).select("certificate").lean();
+            return res.status(409).json({
+                message: "A certificate was just generated for this pickup — reload and open it.",
+                certificateId: fresh?.certificate,
+            });
+        }
 
         try {
             getIo().to(`pickup_${pickup._id}`).emit("pickup:status-updated", {
                 pickupId: pickup._id,
-                status: pickup.status,
+                status: claimed.status,
                 certificateId: cert._id,
             });
         } catch (socketErr) {

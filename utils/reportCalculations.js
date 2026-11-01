@@ -205,6 +205,8 @@ const COD_BUCKETS = [
  *
  * @returns {{ rows: Array<{key,label,method,qtyKg}>, totalKg, pickupCount }}
  */
+const COD_BUCKET_KEYS = new Set(COD_BUCKETS.map((r) => r.key));
+
 function calcCod(pickups = [], bucketOf = () => "other-dry") {
     const totals = Object.create(null);
     let totalKg = 0;
@@ -215,7 +217,12 @@ function calcCod(pickups = [], bucketOf = () => "other-dry") {
         for (const li of p.lineItems || []) {
             const kg = num(li.qtyKg);
             if (kg <= 0) continue;
-            const bucket = bucketOf(li.stream) || "other-dry";
+            // A stream whose configured certificateBucket isn't one of the CoD
+            // template rows (e.g. hazardous/recycled) must still show up, or the
+            // rows would sum to LESS than the printed total — fold it into
+            // "other-dry" so the certificate always reconciles.
+            const raw = bucketOf(li.stream) || "other-dry";
+            const bucket = COD_BUCKET_KEYS.has(raw) ? raw : "other-dry";
             totals[bucket] = (totals[bucket] || 0) + kg;
             totalKg += kg;
             had = true;

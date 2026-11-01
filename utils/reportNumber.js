@@ -22,7 +22,10 @@ const Counter = require("../models/Counter");
 const PREFIX_BY_TYPE = {
     impact: "IMP",
     ghg: "GHG",
-    cod: "CoD", // monthly Certificate of Disposal → CoD-YYYY-####
+    // Monthly Certificate of Disposal → MCD-YYYY-####. A DISTINCT prefix from
+    // the per-pickup certificate (CoD-YYYY-#### via utils/certNumber) so the two
+    // document types can never carry the same number.
+    cod: "MCD",
 };
 
 /**

@@ -256,8 +256,12 @@ const ALLOWED_NEXT_V2 = {
     "v2-empty-weighed": ["v2-at-client", "failed", "no-show"],
     "v2-at-client": ["v2-loading", "failed", "no-show"],
     "v2-loading": ["v2-loaded", "failed", "no-show"],
-    "v2-loaded": ["v2-loaded-weighed", "failed", "no-show"],
-    "v2-loaded-weighed": ["v2-at-facility", "failed", "no-show"],
+    // Once the vehicle is loaded the waste has been collected — like v1 after
+    // 'picked-up', the right correction is now weights/closure, NOT failed/
+    // no-show (which would drop already-collected, already-weighed waste from
+    // all reporting). So failed/no-show are not offered from here on.
+    "v2-loaded": ["v2-loaded-weighed"],
+    "v2-loaded-weighed": ["v2-at-facility"],
     "v2-at-facility": [], // Closure handled by the P2 closure endpoint, not here.
 };
 
@@ -1274,6 +1278,17 @@ const closeRun = async (req, res) => {
         const partialReason = String(req.body.partialReason || "").trim();
         if (isPartial && !partialReason) {
             return res.status(400).json({ message: "partialReason is required for a partial collection." });
+        }
+
+        // Atomic claim of the v2-at-facility → closed transition, so two
+        // simultaneous closes can't both write (which would duplicate the
+        // closure history + client push). The loser gets 409.
+        const claim = await Pickup.updateOne(
+            { _id: pickup._id, status: "v2-at-facility" },
+            { $set: { status: "closed" } }
+        );
+        if (!claim.modifiedCount) {
+            return res.status(409).json({ message: "This pickup was just closed." });
         }
 
         pickup.lineItems = items;
