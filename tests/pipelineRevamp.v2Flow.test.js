@@ -121,13 +121,20 @@ describe("Phase 1 — v2 7-stage workflow", () => {
         expect(res.body.message).toMatch(/waste stream weight/i);
     });
 
-    it("accepts the loaded-weighbridge stage with NO photo (stream entry is photo-optional, like v1)", async () => {
+    it("requires the weighbridge photo at the stream-entry stage", async () => {
         const p = await makePickup(2, "v2-loaded");
-        const res = await advance(p._id, "v2-loaded-weighed", {
+        const noPhoto = await advance(p._id, "v2-loaded-weighed", {
             noPhoto: true,
             body: { lineItems: JSON.stringify([{ stream: "plastic", qtyKg: 120 }]) },
         });
-        expect(res.statusCode).toBe(200);
+        expect(noPhoto.statusCode).toBe(400);
+        expect(noPhoto.body.message).toMatch(/Photo evidence is required/);
+
+        // With the photo it goes through and records the preliminary weights.
+        const ok = await advance(p._id, "v2-loaded-weighed", {
+            body: { lineItems: JSON.stringify([{ stream: "plastic", qtyKg: 120 }]) },
+        });
+        expect(ok.statusCode).toBe(200);
         const fresh = await Pickup.findById(p._id);
         expect(fresh.status).toBe("v2-loaded-weighed");
         expect(fresh.weightsStatus).toBe("preliminary");

@@ -261,12 +261,9 @@ const ALLOWED_NEXT_V2 = {
     "v2-at-facility": [], // Closure handled by the P2 closure endpoint, not here.
 };
 
-// v2 field stages require a photo — EXCEPT the loaded-weighbridge stage, which
-// carries the stream-wise weight entry (exactly like v1's WasteDataForm, where
-// the weighbridge photo is optional).
-const PHOTO_REQUIRED_FOR_V2 = new Set(
-    V2_FIELD_STATUSES.filter((s) => s !== "v2-loaded-weighed")
-);
+// Every v2 field stage requires a photo. Stage 6 (v2-loaded-weighed) carries
+// the stream-wise weight entry AND a mandatory weighbridge photo.
+const PHOTO_REQUIRED_FOR_V2 = new Set(V2_FIELD_STATUSES);
 
 // The loaded-weighbridge stage is where preliminary stream weights are entered.
 const V2_LOADED_WEIGH = "v2-loaded-weighed";
