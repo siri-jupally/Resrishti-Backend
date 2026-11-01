@@ -190,6 +190,16 @@ const pickupSchema = new mongoose.Schema(
         // with a 3-attempt retry loop on rare collisions.
         pickupID: { type: String, required: true, unique: true },
 
+        // --- Pickup pipeline revamp (additive migration, Phase 0) ---
+        // Which stage model this pickup follows:
+        //   1 = legacy flow (requested → … → cert-sent), the only flow before the
+        //       7-stage revamp. Existing rows are backfilled to 1; a MISSING value
+        //       is also treated as 1 (see isLegacyPipeline + migrations/0001).
+        //   2 = new 7-stage flow + explicit Closure (lands in Phase 1).
+        // Default stays 1 until the v2 flow ships, so nothing changes in Phase 0.
+        // Never rewrite this on an existing pickup.
+        pipelineVersion: { type: Number, default: 1, enum: [1, 2], index: true },
+
         client: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Client",
@@ -377,8 +387,38 @@ const isTrackingLive = (pickup) => {
     return TRACKING_ACTIVE_STATUSES.includes(pickup.status);
 };
 
+// --- Pickup pipeline revamp helpers (Phase 0) ---
+
+/**
+ * A pickup created before the 7-stage revamp (or any row whose version is unset)
+ * follows the legacy flow and is grandfathered — it is never forced into the new
+ * pipeline. Branch on this wherever v1 and v2 behave differently.
+ * @param {Object} pickup - Pickup doc or lean object
+ * @returns {boolean} true for legacy (v1 / missing), false for v2
+ */
+const isLegacyPipeline = (pickup) => !pickup || (pickup.pipelineVersion ?? 1) !== 2;
+
+/**
+ * Statuses that mean "the collection is effectively complete — waste has been
+ * recorded." This is the SINGLE SOURCE OF TRUTH for what counts as a closed /
+ * completed pickup across reports, dashboards and public impact. It deliberately
+ * mirrors reportController.ELIGIBLE_PICKUP_STATUSES today (NOT gated on cert
+ * issuance). The v2 explicit "closed" status is added here when it lands (P1/P2),
+ * and P3 re-points the cert-gated dashboards/public-stats onto this set.
+ */
+const CLOSED_EQUIVALENT_STATUSES = ["processed", "cert-draft", "cert-issued", "cert-sent"];
+
+/** True when a pickup is complete enough to count toward impact / reports. */
+const isClosedEquivalent = (statusOrPickup) => {
+    const status = typeof statusOrPickup === "string" ? statusOrPickup : statusOrPickup?.status;
+    return CLOSED_EQUIVALENT_STATUSES.includes(status);
+};
+
 module.exports = Pickup;
 module.exports.photosOf = photosOf;
 module.exports.TRACKING_ACTIVE_STATUSES = TRACKING_ACTIVE_STATUSES;
 module.exports.MAX_TRACKING_POINTS = MAX_TRACKING_POINTS;
 module.exports.isTrackingLive = isTrackingLive;
+module.exports.isLegacyPipeline = isLegacyPipeline;
+module.exports.CLOSED_EQUIVALENT_STATUSES = CLOSED_EQUIVALENT_STATUSES;
+module.exports.isClosedEquivalent = isClosedEquivalent;
