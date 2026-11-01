@@ -11,10 +11,10 @@
   - `round` uses Number.EPSILON compensation so 1.005 → 1.01 rather than 1.00.
 */
 
+// Impact factors are now per-stream and admin-configurable (WasteCategory →
+// wasteCategories.impactFactorConfig), passed into calcImpact. Only the GHG
+// report still reads the hard-coded factors here.
 const {
-    IMPACT_FACTORS,
-    IMPACT_MATERIALS,
-    STREAM_TO_IMPACT_MATERIAL,
     GHG_FACTORS,
     GHG_ORGANIC_STREAMS,
     KG_PER_TON,
@@ -30,59 +30,68 @@ const round = (n, d = 2) => {
     return Math.round((n + Number.EPSILON) * f) / f;
 };
 
+// The metrics carried on the savings indicators, in the shape the per-stream
+// factor config uses. CO2 reuses each stream's co2e factor (see
+// wasteCategories.impactFactorConfig) — it is a first-class impact metric here.
+const IMPACT_METRICS = ["energy", "oil", "landfill", "air", "water", "trees", "co2"];
+
 /**
  * Environmental Impact report.
  *
+ * Factors are PER STREAM and admin-configurable (WasteCategory): the caller
+ * passes `factorByStream` = { [stream]: { energy, oil, landfill, air, water,
+ * trees, co2 } }. Every stream contributes according to its own configured
+ * factors; a stream with no factors set (all zero) adds nothing but its mass.
+ *
  * @param {Array<{lineItems: Array<{stream: string, qtyKg: number}>}>} pickups
- *        Every eligible pickup in the reporting month.
+ * @param {Object<string, {energy,oil,landfill,air,water,trees,co2}>} factorByStream
  * @returns {{
- *   totalWasteKg: number, waterSaved: number, energySaved: number,
- *   treesSaved: number, airPollutants: number, oilSaved: number,
- *   landfillSaved: number, rows: Array, unmappedKg: number
+ *   totalWasteKg, waterSaved, energySaved, treesSaved, airPollutants,
+ *   oilSaved, landfillSaved, co2Saved, rows, unmappedKg
  * }}
  *
- * `totalWasteKg` counts EVERY stream — that is the "TOTAL WASTE RECYCLED"
- * headline. The six savings indicators only accumulate from streams that map
- * to a material in the client's impact sheet; `unmappedKg` reports how much
- * mass produced no savings figure, so the manager can see at review time
- * whether a big chunk of the month went uncounted.
+ * `totalWasteKg` counts EVERY stream — the "TOTAL WASTE RECYCLED" headline.
+ * `unmappedKg` is how much mass came from streams with NO environmental impact
+ * factors configured (CO2 aside), so a reviewer can see if a big chunk of the
+ * month produced no savings figures yet.
  */
-function calcImpact(pickups = []) {
-    // Roll every pickup's line items up into per-material kg first.
-    const kgByMaterial = new Map();
+function calcImpact(pickups = [], factorByStream = {}) {
+    const kgByStream = new Map();
     let totalWasteKg = 0;
-    let unmappedKg = 0;
 
     for (const p of pickups) {
         for (const li of p.lineItems || []) {
             const kg = num(li.qtyKg);
             if (kg <= 0) continue;
             totalWasteKg += kg;
-
-            const material = STREAM_TO_IMPACT_MATERIAL[li.stream];
-            if (!material) {
-                unmappedKg += kg;
-                continue;
-            }
-            kgByMaterial.set(material, (kgByMaterial.get(material) || 0) + kg);
+            kgByStream.set(li.stream, (kgByStream.get(li.stream) || 0) + kg);
         }
     }
 
-    const totals = { energy: 0, oil: 0, landfill: 0, air: 0, water: 0, trees: 0 };
+    const totals = { energy: 0, oil: 0, landfill: 0, air: 0, water: 0, trees: 0, co2: 0 };
     const rows = [];
+    let unmappedKg = 0;
 
-    for (const material of IMPACT_MATERIALS) {
-        const qty = kgByMaterial.get(material) || 0;
-        const f = IMPACT_FACTORS[material];
-        const row = { material, qtyKg: round(qty) };
+    for (const [stream, qty] of kgByStream) {
+        const f = factorByStream[stream] || {};
+        const row = { stream, qtyKg: round(qty) };
+        // A stream is "mapped" when it has at least one environmental savings
+        // factor (CO2 excluded — nearly every stream carries a CO2e default).
+        let hasEnvFactor = false;
 
-        for (const metric of Object.keys(totals)) {
-            const val = qty * f[metric];
+        for (const metric of IMPACT_METRICS) {
+            const factor = num(f[metric]);
+            const val = qty * factor;
             totals[metric] += val;
             row[metric] = round(val);
+            if (metric !== "co2" && factor > 0) hasEnvFactor = true;
         }
+        if (!hasEnvFactor) unmappedKg += qty;
         rows.push(row);
     }
+
+    // Largest stream first — the report table reads top-down by volume.
+    rows.sort((a, b) => b.qtyKg - a.qtyKg);
 
     return {
         totalWasteKg: round(totalWasteKg),
@@ -92,6 +101,7 @@ function calcImpact(pickups = []) {
         airPollutants: round(totals.air),
         oilSaved: round(totals.oil),
         landfillSaved: round(totals.landfill),
+        co2Saved: round(totals.co2),
         rows,
         unmappedKg: round(unmappedKg),
     };

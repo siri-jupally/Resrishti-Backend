@@ -53,6 +53,7 @@ const INDICATOR_ROWS = [
     { key: "energySaved", label: "Energy Saved", unit: "kWh" },
     { key: "treesSaved", label: "Trees Saved", unit: "Trees" },
     { key: "airPollutants", label: "Air Pollutants Reduced", unit: "Kg" },
+    { key: "co2Saved", label: "CO₂e Avoided", unit: "Kg" },
 ];
 
 const styles = StyleSheet.create({

@@ -38,6 +38,7 @@ const Report = require("../models/Report");
 
 const { uploadFile, getS3Client } = require("../utils/s3");
 const { calcImpact, calcGHG } = require("../utils/reportCalculations");
+const { impactFactorConfig } = require("../utils/wasteCategories");
 const { generateReportNumber } = require("../utils/reportNumber");
 const { renderImpactReportPdf } = require("../utils/impactReportPdf");
 const { renderGhgReportPdf } = require("../utils/ghgReportPdf");
@@ -168,9 +169,12 @@ const findEligiblePickups = async (clientId, year, month) => {
 };
 
 /** Compute the type-specific snapshot from a set of pickups. */
-const buildSnapshot = (type, pickups) => {
+const buildSnapshot = async (type, pickups) => {
     if (type === "impact") {
-        const impactSnapshot = calcImpact(pickups);
+        // Per-stream factors come from the admin-configurable WasteCategory
+        // registry, so the report reflects whatever the operations team set.
+        const factorByStream = await impactFactorConfig();
+        const impactSnapshot = calcImpact(pickups, factorByStream);
         return {
             impactSnapshot,
             totalKgSnapshot: impactSnapshot.totalWasteKg,
@@ -276,7 +280,7 @@ const previewReport = async (req, res) => {
         if (!client) return res.status(404).json({ message: "Client not found" });
 
         const pickups = await findEligiblePickups(clientId, year, month);
-        const snap = buildSnapshot(type, pickups);
+        const snap = await buildSnapshot(type, pickups);
 
         // Is there already a report on file for this slot?
         const existing = await Report.findOne({
@@ -340,7 +344,7 @@ const generateReport = async (req, res) => {
         if (!client) return res.status(404).json({ message: "Client not found" });
 
         const pickups = await findEligiblePickups(clientId, year, month);
-        const snap = buildSnapshot(type, pickups);
+        const snap = await buildSnapshot(type, pickups);
 
         if (snap.isEmpty) {
             return res.status(409).json({
@@ -719,7 +723,7 @@ const reviseReport = async (req, res) => {
             oldReport.periodYear,
             oldReport.periodMonth
         );
-        const snap = buildSnapshot(oldReport.type, pickups);
+        const snap = await buildSnapshot(oldReport.type, pickups);
 
         const newReport = await Report.create({
             reportNumber: oldReport.reportNumber, // number is stable across revisions

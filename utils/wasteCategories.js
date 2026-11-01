@@ -34,6 +34,31 @@ const CORE_CATEGORIES = [
     { key: "other", label: "Other", co2eFactorKgPerKg: 0.5, certificateBucket: "other-dry", sortOrder: 110 },
 ];
 
+// The six per-kg Environmental Impact factors, as the WasteCategory fields.
+const IMPACT_METRIC_FIELDS = [
+    "impactEnergyPerKg", "impactOilPerKg", "impactLandfillPerKg",
+    "impactAirPerKg", "impactWaterPerKg", "impactTreesPerKg",
+];
+
+// Official seed figures (the ones that were hard-coded in reportFactors.js,
+// decoded from the client's "Impact sheet.xlsx"). Only the four streams the
+// client has a defensible figure for are seeded; every other stream starts at
+// zero and waits for the operations team to enter an official value — the
+// Impact report is auditor-facing, so nothing here is invented. `battery`
+// reuses the E-waste figures (mirrors STREAM_TO_IMPACT_MATERIAL.battery).
+const IMPACT_SEED = {
+    plastic: { impactEnergyPerKg: 5.774, impactOilPerKg: 2.593, impactLandfillPerKg: 0.81, impactAirPerKg: 2.5, impactWaterPerKg: 18.17, impactTreesPerKg: 0 },
+    paper: { impactEnergyPerKg: 4.1, impactOilPerKg: 1.4384, impactLandfillPerKg: 0.0891, impactAirPerKg: 0.0272, impactWaterPerKg: 26.4978, impactTreesPerKg: 0.017 },
+    ewaste: { impactEnergyPerKg: 4.123779, impactOilPerKg: 1.85324644, impactLandfillPerKg: 0.260361, impactAirPerKg: 0.50409844, impactWaterPerKg: 3.653987, impactTreesPerKg: 0 },
+    battery: { impactEnergyPerKg: 4.123779, impactOilPerKg: 1.85324644, impactLandfillPerKg: 0.260361, impactAirPerKg: 0.50409844, impactWaterPerKg: 3.653987, impactTreesPerKg: 0 },
+};
+// Fold the seed figures onto the core rows (unseeded streams keep 0 via the
+// schema default), so seeding a fresh DB and "Reset factors" both apply them.
+for (const c of CORE_CATEGORIES) {
+    const seed = IMPACT_SEED[c.key];
+    for (const field of IMPACT_METRIC_FIELDS) c[field] = (seed && seed[field]) || 0;
+}
+
 // Used when a stream is not in the list at all — same number the old
 // emissionFactors.js fell back to.
 const DEFAULT_FACTOR = 0.5;
@@ -118,10 +143,36 @@ const allStreamKeys = async () => {
     return cache.map((c) => c.key);
 };
 
+/**
+ * Per-stream Environmental Impact factors for the monthly report, keyed by
+ * stream key: { energy, oil, landfill, air, water, trees, co2 }. CO2 is the
+ * stream's co2eFactorKgPerKg (not a separate field). Authoritative — refreshes
+ * the cache first so an admin edit is reflected in the next report.
+ */
+const num0 = (v) => (Number.isFinite(v) ? v : 0);
+const impactFactorConfig = async () => {
+    await refreshCache();
+    const map = {};
+    for (const c of cache) {
+        map[c.key] = {
+            energy: num0(c.impactEnergyPerKg),
+            oil: num0(c.impactOilPerKg),
+            landfill: num0(c.impactLandfillPerKg),
+            air: num0(c.impactAirPerKg),
+            water: num0(c.impactWaterPerKg),
+            trees: num0(c.impactTreesPerKg),
+            co2: Number.isFinite(c.co2eFactorKgPerKg) ? c.co2eFactorKgPerKg : DEFAULT_FACTOR,
+        };
+    }
+    return map;
+};
+
 module.exports = {
     CORE_CATEGORIES,
+    IMPACT_METRIC_FIELDS,
     DEFAULT_FACTOR,
     DEFAULT_BUCKET,
+    impactFactorConfig,
     seedCoreCategories,
     refreshCache,
     initWasteCategories,

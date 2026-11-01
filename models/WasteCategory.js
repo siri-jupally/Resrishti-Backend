@@ -48,8 +48,21 @@ const wasteCategorySchema = new mongoose.Schema(
         description: { type: String, trim: true, maxlength: 300 },
 
         // kg CO2e avoided per kg recycled. Drives the public impact counter and
-        // the client dashboard.
+        // the client dashboard. Also serves as the CO2 metric on the monthly
+        // Environmental Impact report.
         co2eFactorKgPerKg: { type: Number, default: 0.5, min: 0, max: 100 },
+
+        // Per-kg Environmental Impact factors (monthly Impact report). Each is
+        // "savings per 1 kg of this stream recycled"; default 0 so a stream
+        // contributes nothing to the savings indicators until the operations
+        // team enters an official figure (the report is auditor-facing — we
+        // never invent these). CO2 is co2eFactorKgPerKg above, not duplicated.
+        impactEnergyPerKg: { type: Number, default: 0, min: 0, max: 100000 },   // kWh
+        impactOilPerKg: { type: Number, default: 0, min: 0, max: 100000 },      // Liters
+        impactLandfillPerKg: { type: Number, default: 0, min: 0, max: 100000 }, // ft3
+        impactAirPerKg: { type: Number, default: 0, min: 0, max: 100000 },      // kg air pollutants
+        impactWaterPerKg: { type: Number, default: 0, min: 0, max: 100000 },    // Liters
+        impactTreesPerKg: { type: Number, default: 0, min: 0, max: 100000 },    // trees (count)
 
         certificateBucket: {
             type: String,

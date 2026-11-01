@@ -15,7 +15,21 @@ const {
     seedCoreCategories,
     refreshCache,
     CORE_CATEGORIES,
+    IMPACT_METRIC_FIELDS,
 } = require("../utils/wasteCategories");
+
+// Validate + copy the six per-kg Environmental Impact factors from a request
+// body onto a target (a new-doc object or an existing document). Only fields
+// present in the body are touched. Returns an error message, or null on success.
+const applyImpactFactors = (body, target) => {
+    for (const field of IMPACT_METRIC_FIELDS) {
+        if (body[field] === undefined) continue;
+        const v = Number(body[field]);
+        if (!Number.isFinite(v) || v < 0) return `${field} must be zero or more`;
+        target[field] = v;
+    }
+    return null;
+};
 
 const adminOnly = (req, res) => {
     if (!req.admin) {
@@ -84,12 +98,16 @@ const createWasteCategory = async (req, res) => {
         if (factor !== undefined && (!Number.isFinite(Number(factor)) || Number(factor) < 0)) {
             return res.status(400).json({ message: "co2eFactorKgPerKg must be zero or more" });
         }
+        const impact = {};
+        const impactErr = applyImpactFactors(req.body, impact);
+        if (impactErr) return res.status(400).json({ message: impactErr });
 
         const created = await WasteCategory.create({
             key,
             label,
             description: String(req.body.description || "").trim() || undefined,
             co2eFactorKgPerKg: factor === undefined ? 0.5 : Number(factor),
+            ...impact,
             certificateBucket: bucket,
             sortOrder: Number.isFinite(Number(req.body.sortOrder))
                 ? Number(req.body.sortOrder)
@@ -138,6 +156,8 @@ const updateWasteCategory = async (req, res) => {
             }
             category.co2eFactorKgPerKg = factor;
         }
+        const impactErr = applyImpactFactors(req.body, category);
+        if (impactErr) return res.status(400).json({ message: impactErr });
         if (req.body.certificateBucket !== undefined) {
             if (!CERTIFICATE_BUCKETS.includes(req.body.certificateBucket)) {
                 return res.status(400).json({
@@ -212,21 +232,31 @@ const deleteWasteCategory = async (req, res) => {
 
 // POST /api/admin/waste-categories/reset-factors
 //
-// Puts the CO2e factors back to the values shipped with the product, for when
-// an edit turns out to be wrong and nobody remembers the old number.
+// Puts the CO2e factor AND the six Environmental Impact factors back to the
+// values shipped with the product, for when an edit turns out to be wrong and
+// nobody remembers the old number. This is also how an existing database picks
+// up the seeded impact figures the first time (rows created before this field
+// existed default to zero until reset or edited).
 const resetFactors = async (req, res) => {
     if (!adminOnly(req, res)) return;
     try {
         let changed = 0;
         for (const core of CORE_CATEGORIES) {
-            const result = await WasteCategory.updateOne(
-                { key: core.key, co2eFactorKgPerKg: { $ne: core.co2eFactorKgPerKg } },
-                { $set: { co2eFactorKgPerKg: core.co2eFactorKgPerKg } }
-            );
-            changed += result.modifiedCount || 0;
+            const doc = await WasteCategory.findOne({ key: core.key });
+            if (!doc) continue;
+            const target = { co2eFactorKgPerKg: core.co2eFactorKgPerKg };
+            for (const f of IMPACT_METRIC_FIELDS) target[f] = core[f] || 0;
+            // Only touch a stream whose co2e or any impact factor actually
+            // differs — so `changed` is meaningful, while still backfilling the
+            // seeded impact figures onto rows created before the field existed.
+            let diff = false;
+            for (const [f, v] of Object.entries(target)) {
+                if (Number(doc[f]) !== Number(v)) { doc[f] = v; diff = true; }
+            }
+            if (diff) { await doc.save(); changed += 1; }
         }
         await refreshCache();
-        return res.json({ message: `Reset ${changed} factor(s) to the shipped values`, changed });
+        return res.json({ message: `Reset factors for ${changed} stream(s) to the shipped values`, changed });
     } catch (err) {
         console.error("resetFactors error:", err.message);
         return res.status(500).json({ message: err.message });
