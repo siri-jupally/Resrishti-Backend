@@ -44,4 +44,33 @@ const getLogo = () => {
     return _logo;
 };
 
-module.exports = { getLogo, ASSETS_DIR };
+// ---- Certificate template assets (new GreenEarth designs) ----
+// The CoD + Environmental Impact certificates were redesigned to match the
+// client-supplied templates. Their graphics (logo, signature, seal, the gold
+// swirl frame pieces, the impact icons) live in assets/cert/ and are loaded the
+// same memoised, Buffer-based way as the logo above — a string path src breaks
+// under react-pdf's fetch(), and a missing asset must never fail a document.
+const path2 = require("path");
+const CERT_DIR = path2.join(ASSETS_DIR, "cert");
+const _certCache = Object.create(null);
+
+/**
+ * Load a certificate asset from assets/cert/ as a react-pdf image source.
+ * @param {string} file  e.g. "cert-logo.png"
+ * @returns {{data: Buffer, format: string}|null}
+ */
+const getCertAsset = (file) => {
+    if (file in _certCache) return _certCache[file];
+    try {
+        const data = fs.readFileSync(path.join(CERT_DIR, file));
+        const ext = path.extname(file).slice(1).toLowerCase();
+        const format = ext === "jpg" ? "jpeg" : ext; // react-pdf wants "jpg"->"jpeg"? accepts png/jpg
+        _certCache[file] = { data, format: format === "jpeg" ? "jpg" : format };
+    } catch (err) {
+        console.warn(`PDF cert asset '${file}' unavailable, rendering without it:`, err.message);
+        _certCache[file] = null;
+    }
+    return _certCache[file];
+};
+
+module.exports = { getLogo, getCertAsset, ASSETS_DIR, CERT_DIR };

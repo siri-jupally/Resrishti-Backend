@@ -28,6 +28,13 @@ const {
   PutBucketLifecycleConfigurationCommand,
 } = require("@aws-sdk/client-s3");
 
+// Opt-in test stub. When STUB_S3=1 every upload/delete/lifecycle call becomes a
+// no-op that returns a deterministic fake object key WITHOUT touching AWS. This
+// exists so UI / integration E2E runs (which drive the real photo-evidence
+// endpoints) don't write throwaway images into the live S3 bucket. It changes
+// NOTHING unless the env var is explicitly set to "1"; prod never sets it.
+const STUB_S3 = process.env.STUB_S3 === "1";
+
 const getS3Client = () => {
   const region = process.env.AWS_REGION;
   if (!region) throw new Error("AWS_REGION is not set");
@@ -69,6 +76,8 @@ const uploadTaskAttachment = async ({
   originalName,
   contentType,
 }) => {
+  const safeNameStub = sanitizeFileName(originalName);
+  if (STUB_S3) return { bucket: "stub-bucket", key: `tasks/${taskId}/${Date.now()}-${safeNameStub}`, fileName: safeNameStub };
   const bucket = process.env.S3_BUCKET_NAME;
   if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 
@@ -104,6 +113,8 @@ const uploadFile = async ({
   originalName,
   contentType,
 }) => {
+  const safeNameStub = sanitizeFileName(originalName);
+  if (STUB_S3) { const k = `${folder}/${Date.now()}-${safeNameStub}`; return { bucket: "stub-bucket", key: k, url: k }; }
   const bucket = process.env.S3_BUCKET_NAME;
   if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 
@@ -137,6 +148,7 @@ const uploadFile = async ({
  * @returns {Promise<{bucket: string, key: string}>}
  */
 const uploadCheckinPhoto = async ({ role, userId, buffer, contentType }) => {
+  if (STUB_S3) return { bucket: "stub-bucket", key: `checkin-photos/${role}/${userId}/${Date.now()}.jpg` };
   const bucket = process.env.S3_BUCKET_NAME;
   if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 
@@ -175,6 +187,10 @@ const uploadCheckinPhoto = async ({ role, userId, buffer, contentType }) => {
  * @returns {Promise<{bucket: string, key: string}>}
  */
 const uploadPickupEvidence = async ({ pickupID, status, buffer, contentType, index = 0 }) => {
+    if (STUB_S3) {
+        const nonceStub = crypto.randomBytes(3).toString("hex");
+        return { bucket: "stub-bucket", key: `pickup-evidence/${pickupID}/${status}-${Date.now()}-${index}-${nonceStub}.jpg` };
+    }
     const bucket = process.env.S3_BUCKET_NAME;
     if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 
@@ -195,6 +211,7 @@ const uploadPickupEvidence = async ({ pickupID, status, buffer, contentType, ind
 };
 
 const deleteS3Object = async ({ bucket, key }) => {
+  if (STUB_S3) return;
   if (!bucket || !key) return;
   const client = getS3Client();
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
@@ -208,6 +225,7 @@ const deleteS3Object = async ({ bucket, key }) => {
  * Requires `s3:PutLifecycleConfiguration` on the bucket.
  */
 const applyCheckinPhotoLifecycle = async () => {
+  if (STUB_S3) return { bucket: "stub-bucket", ruleId: "checkin-photos-7d-expiry" };
   const bucket = process.env.S3_BUCKET_NAME;
   if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 
@@ -251,6 +269,7 @@ const applyCheckinPhotoLifecycle = async () => {
  * Requires `s3:PutLifecycleConfiguration` on the bucket.
  */
 const applyPickupEvidenceLifecycle = async () => {
+    if (STUB_S3) return { bucket: "stub-bucket", ruleId: "pickup-evidence-30d-expiry" };
     const bucket = process.env.S3_BUCKET_NAME;
     if (!bucket) throw new Error("S3_BUCKET_NAME is not set");
 

@@ -726,9 +726,13 @@ const reviseReport = async (req, res) => {
 
         const oldReport = await Report.findById(id);
         if (!oldReport) return res.status(404).json({ message: "Report not found" });
-        if (oldReport.status !== "sent") {
+        // An issued report is still internal (the client portal only shows
+        // sent/superseded), so letting it be revised is safe and gives the
+        // coordinator a way to regenerate a period's figures after issuing but
+        // before sending. A draft is edited in place via generate (Refresh).
+        if (oldReport.status !== "sent" && oldReport.status !== "issued") {
             return res.status(409).json({
-                message: `Only sent reports can be revised (current: '${oldReport.status}')`,
+                message: `Only issued or sent reports can be revised (current: '${oldReport.status}')`,
             });
         }
 

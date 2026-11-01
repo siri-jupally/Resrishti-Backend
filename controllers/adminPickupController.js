@@ -258,7 +258,7 @@ const listPickups = async (req, res) => {
     const Pickup = require("../models/Pickup");
 
     try {
-        const { status, supervisor, client, from, to } = req.query;
+        const { status, supervisor, client, from, to, search, stream } = req.query;
         const limit = Math.min(Number(req.query.limit) || 50, 200);
         const offset = Number(req.query.offset) || 0;
 
@@ -275,6 +275,26 @@ const listPickups = async (req, res) => {
         }
         if (client && mongoose.Types.ObjectId.isValid(client)) {
             filter.client = client;
+        }
+        // Free-text search over the human-friendly pickup ID + client name
+        // snapshot (case-insensitive). The input is regex-escaped so a client
+        // name with special characters can't break the query.
+        if (search && String(search).trim()) {
+            const safe = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const rx = new RegExp(safe, "i");
+            filter.$or = [{ pickupID: rx }, { clientNameSnapshot: rx }];
+        }
+        // Waste-stream filter: pickups that requested (or were collected with)
+        // the given stream. Combine safely with the search $or via $and.
+        if (stream && String(stream).trim()) {
+            const s = String(stream).trim();
+            const streamCond = { $or: [{ requestedStreams: s }, { "lineItems.stream": s }] };
+            if (filter.$or) {
+                filter.$and = [{ $or: filter.$or }, streamCond];
+                delete filter.$or;
+            } else {
+                Object.assign(filter, streamCond);
+            }
         }
         if (from || to) {
             filter.requestedDate = {};
