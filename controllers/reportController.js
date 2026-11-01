@@ -37,11 +37,12 @@ const Pickup = require("../models/Pickup");
 const Report = require("../models/Report");
 
 const { uploadFile, getS3Client } = require("../utils/s3");
-const { calcImpact, calcGHG } = require("../utils/reportCalculations");
-const { impactFactorConfig } = require("../utils/wasteCategories");
+const { calcImpact, calcGHG, calcCod } = require("../utils/reportCalculations");
+const { impactFactorConfig, bucketForStream, refreshCache } = require("../utils/wasteCategories");
 const { generateReportNumber } = require("../utils/reportNumber");
 const { renderImpactReportPdf } = require("../utils/impactReportPdf");
 const { renderGhgReportPdf } = require("../utils/ghgReportPdf");
+const { renderMonthlyCodPdf } = require("../utils/monthlyCodPdf");
 const { sendEmail } = require("../utils/emailService");
 const { notifyIfEnabled } = require("../utils/push");
 
@@ -55,11 +56,12 @@ const MONTHS = [
     "July", "August", "September", "October", "November", "December",
 ];
 
-const REPORT_TYPES = ["impact", "ghg"];
+const REPORT_TYPES = ["impact", "ghg", "cod"];
 
 const TYPE_LABEL = {
     impact: "Environmental Impact Report",
     ghg: "Green House Gases Emission Report",
+    cod: "Certificate of Disposal",
 };
 
 /*
@@ -181,6 +183,17 @@ const buildSnapshot = async (type, pickups) => {
             isEmpty: impactSnapshot.totalWasteKg <= 0,
         };
     }
+    if (type === "cod") {
+        // Monthly Certificate of Disposal — aggregate the month's disposed
+        // waste by certificate bucket (admin-configurable stream → bucket).
+        await refreshCache();
+        const codSnapshot = calcCod(pickups, bucketForStream);
+        return {
+            codSnapshot,
+            totalKgSnapshot: codSnapshot.totalKg,
+            isEmpty: codSnapshot.totalKg <= 0,
+        };
+    }
     const ghgSnapshot = calcGHG(pickups);
     return {
         ghgSnapshot,
@@ -219,10 +232,11 @@ const presignFor = async (pdf) => {
     }
 };
 
-const renderFor = (report, client) =>
-    report.type === "impact"
-        ? renderImpactReportPdf(report, client)
-        : renderGhgReportPdf(report, client);
+const renderFor = (report, client) => {
+    if (report.type === "impact") return renderImpactReportPdf(report, client);
+    if (report.type === "cod") return renderMonthlyCodPdf(report, client);
+    return renderGhgReportPdf(report, client);
+};
 
 // No presigned S3 URL here — it would expose the bucket, region and access-key
 // ID in the mail body and stay live for its full expiry to anyone it's
@@ -308,6 +322,7 @@ const previewReport = async (req, res) => {
             totalKg: snap.totalKgSnapshot,
             impactSnapshot: snap.impactSnapshot || null,
             ghgSnapshot: snap.ghgSnapshot || null,
+            codSnapshot: snap.codSnapshot || null,
             existing: existing
                 ? {
                       _id: existing._id,
@@ -384,6 +399,7 @@ const generateReport = async (req, res) => {
             totalKgSnapshot: snap.totalKgSnapshot,
             impactSnapshot: snap.impactSnapshot,
             ghgSnapshot: snap.ghgSnapshot,
+            codSnapshot: snap.codSnapshot,
             generatedAt: new Date(),
         };
 
@@ -739,6 +755,7 @@ const reviseReport = async (req, res) => {
             totalKgSnapshot: snap.totalKgSnapshot,
             impactSnapshot: snap.impactSnapshot,
             ghgSnapshot: snap.ghgSnapshot,
+            codSnapshot: snap.codSnapshot,
             generatedAt: new Date(),
         });
 

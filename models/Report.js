@@ -82,7 +82,7 @@ const reportSchema = new mongoose.Schema(
 
         type: {
             type: String,
-            enum: ["impact", "ghg"],
+            enum: ["impact", "ghg", "cod"],
             required: true,
         },
 
@@ -147,6 +147,20 @@ const reportSchema = new mongoose.Schema(
                 _id: false,
             },
             netGHGSavings: Number,
+            _id: false,
+        },
+
+        // Populated for type === 'cod' — the monthly Certificate of Disposal,
+        // disposed waste aggregated by certificate bucket.
+        codSnapshot: {
+            rows: [
+                new mongoose.Schema(
+                    { key: String, label: String, method: String, qtyKg: Number },
+                    { _id: false }
+                ),
+            ],
+            totalKg: Number,
+            pickupCount: Number,
             _id: false,
         },
 

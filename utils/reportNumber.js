@@ -22,6 +22,7 @@ const Counter = require("../models/Counter");
 const PREFIX_BY_TYPE = {
     impact: "IMP",
     ghg: "GHG",
+    cod: "CoD", // monthly Certificate of Disposal → CoD-YYYY-####
 };
 
 /**

@@ -184,4 +184,47 @@ function calcGHG(pickups = []) {
     };
 }
 
-module.exports = { calcImpact, calcGHG, round };
+// The fixed rows of the Certificate of Disposal, matching the per-pickup CoD
+// template (utils/certificatePdf.js TEMPLATE_ROWS). `metal`/`glass` have no
+// stream mapping today, so they render at zero — kept so the monthly CoD reads
+// as the same official document.
+const COD_BUCKETS = [
+    { key: "wet", label: "Wet / Organic Waste", method: "Processed at our facility through composting / bio-processing" },
+    { key: "plastic", label: "Plastic Waste", method: "Segregated and recycled at our facility" },
+    { key: "paper", label: "Paper / Cardboard", method: "Sent to authorized recycler" },
+    { key: "metal", label: "Metal Waste", method: "Sent to authorized recycler" },
+    { key: "glass", label: "Glass Waste", method: "Sent to authorized recycler" },
+    { key: "ewaste", label: "E-Waste", method: "Sent to authorized recycler" },
+    { key: "other-dry", label: "Other Dry Waste", method: "Sent to authorized recycler" },
+];
+
+/**
+ * Monthly Certificate of Disposal — aggregate a client's disposed waste for the
+ * month by certificate bucket. `bucketOf(stream)` maps a stream to one of the
+ * COD_BUCKETS keys (pass wasteCategories.bucketForStream).
+ *
+ * @returns {{ rows: Array<{key,label,method,qtyKg}>, totalKg, pickupCount }}
+ */
+function calcCod(pickups = [], bucketOf = () => "other-dry") {
+    const totals = Object.create(null);
+    let totalKg = 0;
+    let pickupCount = 0;
+
+    for (const p of pickups) {
+        let had = false;
+        for (const li of p.lineItems || []) {
+            const kg = num(li.qtyKg);
+            if (kg <= 0) continue;
+            const bucket = bucketOf(li.stream) || "other-dry";
+            totals[bucket] = (totals[bucket] || 0) + kg;
+            totalKg += kg;
+            had = true;
+        }
+        if (had) pickupCount += 1;
+    }
+
+    const rows = COD_BUCKETS.map((r) => ({ ...r, qtyKg: round(totals[r.key] || 0) }));
+    return { rows, totalKg: round(totalKg), pickupCount };
+}
+
+module.exports = { calcImpact, calcGHG, calcCod, COD_BUCKETS, round };

@@ -352,7 +352,7 @@ const listMyReports = async (req, res) => {
     }
 
     const filter = { client: clientId, status: statusFilter };
-    if (["impact", "ghg"].includes(req.query.type)) filter.type = req.query.type;
+    if (["impact", "ghg", "cod"].includes(req.query.type)) filter.type = req.query.type;
     const year = parseInt(req.query.year, 10);
     if (Number.isInteger(year)) filter.periodYear = year;
 

@@ -12,6 +12,7 @@
 // reportController's PDF renderers are mocked (same pattern as the cert tests).
 jest.mock("../utils/impactReportPdf", () => ({ renderImpactReportPdf: jest.fn() }));
 jest.mock("../utils/ghgReportPdf", () => ({ renderGhgReportPdf: jest.fn() }));
+jest.mock("../utils/monthlyCodPdf", () => ({ renderMonthlyCodPdf: jest.fn() }));
 
 const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
