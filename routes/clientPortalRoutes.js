@@ -35,6 +35,9 @@ const {
   listWasteCategories,
   updateMyProfile,
   subscribeClient,
+  createMySite,
+  updateMySite,
+  removeMySite,
 } = require("../controllers/clientPortalController");
 const {
   forgotPassword,
@@ -71,6 +74,10 @@ router.get("/reports/:id/download", protectClient, downloadMyReport);
 
 // The client's own buildings, for tagging a pickup request to a site.
 router.get("/sites", protectClient, listMySites);
+// The client manages their own sites from the Profile page (scoped to req.client).
+router.post("/sites", protectClient, createMySite);
+router.patch("/sites/:id", protectClient, updateMySite);
+router.delete("/sites/:id", protectClient, removeMySite);
 // The configured waste streams, for the pickup request form.
 router.get("/waste-categories", protectClient, listWasteCategories);
 

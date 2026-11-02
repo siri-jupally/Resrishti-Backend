@@ -481,7 +481,7 @@ const downloadMyReport = async (req, res) => {
 const listMySites = async (req, res) => {
   try {
     const sites = await Site.find({ client: req.client._id, isActive: true })
-      .select("name description address")
+      .select("name description address contactName contactPhone")
       .sort({ name: 1 })
       .lean();
     return res.json({ items: sites, total: sites.length });
@@ -592,6 +592,108 @@ const subscribeClient = async (req, res) => {
   }
 };
 
+// ---- Client-managed collection sites -------------------------------------
+// A client maintains their own buildings/locations (the Site registry) from the
+// portal. Every query is scoped to req.client._id, so a client can only ever
+// see or touch their own sites. `client` is never reassignable — moving a site
+// between clients would retroactively move tonnage between issued reports.
+const SITE_ADDRESS_KEYS = ["line1", "line2", "city", "state", "postalCode", "country"];
+const cleanSiteAddress = (addr) => {
+  if (!addr || typeof addr !== "object") return undefined;
+  const out = {};
+  for (const k of SITE_ADDRESS_KEYS) {
+    if (addr[k] !== undefined) out[k] = String(addr[k]).trim();
+  }
+  return out;
+};
+
+// POST /api/client/sites
+const createMySite = async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = String(b.name || "").trim();
+    if (!name) return res.status(400).json({ message: "Site name is required" });
+    const site = await Site.create({
+      client: req.client._id,
+      name,
+      description: b.description !== undefined ? String(b.description).trim() : undefined,
+      address: cleanSiteAddress(b.address),
+      contactName: b.contactName !== undefined ? String(b.contactName).trim() : undefined,
+      contactPhone: b.contactPhone !== undefined ? String(b.contactPhone).trim() : undefined,
+    });
+    return res.status(201).json({ site });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: "You already have a site with that name" });
+    }
+    console.error("createMySite error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// PATCH /api/client/sites/:id
+const updateMySite = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: "Invalid site id" });
+    }
+    const site = await Site.findOne({ _id: req.params.id, client: req.client._id });
+    if (!site) return res.status(404).json({ message: "Site not found" });
+
+    const b = req.body || {};
+    if (b.name !== undefined) {
+      const v = String(b.name).trim();
+      if (!v) return res.status(400).json({ message: "Site name can't be empty" });
+      site.name = v;
+    }
+    if (b.description !== undefined) site.description = String(b.description).trim();
+    if (b.contactName !== undefined) site.contactName = String(b.contactName).trim();
+    if (b.contactPhone !== undefined) site.contactPhone = String(b.contactPhone).trim();
+    if (b.address && typeof b.address === "object") {
+      const cur = site.address
+        ? (site.address.toObject ? site.address.toObject() : { ...site.address })
+        : {};
+      for (const k of SITE_ADDRESS_KEYS) {
+        if (b.address[k] !== undefined) cur[k] = String(b.address[k]).trim();
+      }
+      site.address = cur;
+      site.markModified("address");
+    }
+    await site.save();
+    return res.json({ site });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: "You already have a site with that name" });
+    }
+    console.error("updateMySite error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// DELETE /api/client/sites/:id — hard-delete when nothing references it, else
+// soft-retire (isActive:false) so issued reports / past pickups stay reproducible.
+const removeMySite = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: "Invalid site id" });
+    }
+    const site = await Site.findOne({ _id: req.params.id, client: req.client._id });
+    if (!site) return res.status(404).json({ message: "Site not found" });
+
+    const pickupCount = await Pickup.countDocuments({ site: site._id });
+    if (pickupCount > 0) {
+      site.isActive = false;
+      await site.save();
+      return res.json({ retired: true, message: "Site retired (past pickups reference it)." });
+    }
+    await site.deleteOne();
+    return res.json({ deleted: true, _id: String(site._id) });
+  } catch (err) {
+    console.error("removeMySite error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   loginClient,
   listWasteCategories,
@@ -604,4 +706,7 @@ module.exports = {
   downloadMyCertificate,
   updateMyProfile,
   subscribeClient,
+  createMySite,
+  updateMySite,
+  removeMySite,
 };
