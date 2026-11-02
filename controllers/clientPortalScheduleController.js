@@ -66,15 +66,33 @@ const createSchedule = async (req, res) => {
             cadence: normalizeCadence(cadence),
             startDate: start,
             endDate: end,
-            status: "active",
+            // A client's recurring request starts PENDING — it generates no
+            // pickups until an admin approves it and picks a default supervisor.
+            status: "pending",
             createdByType: "Client",
             createdById: client._id,
             createdByName: client.name,
         });
 
-        // Produce the first pickup(s) immediately if any occurrence is already
-        // within the lead window, so the client sees it without waiting a day.
-        try { await generateDueForSchedule(schedule); } catch (e) { console.error("generateDueForSchedule (create):", e.message); }
+        // No pickups are generated yet — a pending schedule waits for approval.
+        // Let the coordinators know a recurring request needs a decision.
+        try {
+            const Admin = require("../models/Admin");
+            const Manager = require("../models/Manager");
+            const { sendPush } = require("../utils/push");
+            const [admins, managers] = await Promise.all([
+                Admin.find({ canCoordinate: true, pushSubscription: { $exists: true, $ne: null } }).select("pushSubscription").lean(),
+                Manager.find({ canCoordinate: true, pushSubscription: { $exists: true, $ne: null } }).select("pushSubscription").lean(),
+            ]);
+            const payload = {
+                title: "New recurring request",
+                body: `${client.name} requested a recurring pickup — approve it to start scheduling.`,
+                icon: "/android-chrome-512x512.png",
+                tag: `recurring-new-${schedule._id}`,
+                data: { url: `/admin/dashboard?tab=pickups&sub=recurring&id=${schedule._id}` },
+            };
+            await Promise.all([...admins, ...managers].filter((r) => r.pushSubscription).map((r) => sendPush(r.pushSubscription, payload)));
+        } catch (e) { console.error("recurring request notify failed:", e.message); }
 
         const fresh = await PickupSchedule.findById(schedule._id).lean();
         return res.status(201).json(withSummary(fresh));

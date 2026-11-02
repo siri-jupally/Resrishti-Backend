@@ -99,6 +99,15 @@ async function createPickupForClient({
     // the doc at creation so the (recurringScheduleId, requestedDate) unique
     // index enforces one-pickup-per-occurrence atomically.
     recurringScheduleId = null,
+    // A supervisor snapshot ({ userType, userId, name, phone }) to assign the
+    // pickup to at creation. Used by the recurring job once an admin has
+    // approved the schedule and chosen a default supervisor: the occurrence is
+    // created already "accepted" and assigned, skipping per-pickup triage.
+    // Takes precedence over assignToActor.
+    assignSupervisor = null,
+    // Explicit scheduled datetime for a pre-assigned pickup; falls back to the
+    // requestedDate when omitted.
+    scheduledDate = null,
 }) {
     if (!client || !client._id) {
         throw new PickupCreationError(400, "A valid client is required");
@@ -187,15 +196,38 @@ async function createPickupForClient({
         ? { userType: createdByActor.userType, userId: createdByActor.userId, name: createdByActor.name }
         : null;
 
-    // Audit entry recording the staff member who created it (and self-assignment
-    // when applicable). Only added for the staff flow, so the client
-    // self-service path is unchanged.
+    // A pre-assigned pickup skips triage: created "accepted" with a supervisor
+    // already on it. Two sources — an explicit supervisor snapshot (the
+    // recurring job's approved default supervisor) or self-assign to the
+    // creating agent. The explicit snapshot wins.
+    const supSnap = assignSupervisor
+        ? {
+              userType: assignSupervisor.userType,
+              userId: assignSupervisor.userId,
+              name: assignSupervisor.name,
+              phone: assignSupervisor.phone,
+          }
+        : selfAssign
+        ? {
+              userType: createdByActor.userType,
+              userId: createdByActor.userId,
+              name: createdByActor.name,
+              phone: createdByActor.phone,
+          }
+        : null;
+    const preAssigned = Boolean(supSnap);
+
+    // Audit entry recording how the pickup was created and (when applicable) who
+    // it was assigned to. Only added for the staff / recurring flows, so the
+    // client self-service path is byte-for-byte unchanged.
     const evidence = createdByActor
         ? [
               {
-                  status: selfAssign ? "accepted" : "requested",
+                  status: preAssigned ? "accepted" : "requested",
                   notes: (
-                      selfAssign
+                      assignSupervisor
+                          ? `Auto-created from approved recurring schedule; assigned to ${assignSupervisor.name || "supervisor"}`
+                          : selfAssign
                           ? `Created & self-assigned by ${createdByActor.userType} ${createdByActor.name || ""}`
                           : `Created on behalf of client by ${createdByActor.userType} ${createdByActor.name || ""}`
                   ).trim() + (isPast ? " — backdated" : ""),
@@ -225,24 +257,24 @@ async function createPickupForClient({
                 // Every NEW pickup runs the v2 (7-stage) flow. Set explicitly —
                 // the model default is 1 so pre-existing rows stay legacy.
                 pipelineVersion: 2,
-                status: selfAssign ? "accepted" : "requested",
+                status: preAssigned ? "accepted" : "requested",
                 ...(recurringScheduleId ? { recurringScheduleId } : {}),
                 ...(evidence ? { evidence } : {}),
             };
-            if (selfAssign) {
+            if (preAssigned) {
                 // Mirror what admin acceptPickup sets: accepted + scheduled +
                 // supervisor, so the pickup follows the normal field lifecycle
                 // from "accepted" onward — just without a triage round-trip.
-                doc.scheduledDate = rd;
+                doc.scheduledDate = scheduledDate ? new Date(scheduledDate) : rd;
                 doc.acceptedAt = now;
-                doc.acceptedBy = actorRef;
+                doc.acceptedBy = actorRef || { userType: supSnap.userType, userId: supSnap.userId, name: supSnap.name };
                 doc.supervisor = {
-                    userType: createdByActor.userType, // Admin | Manager | Employee
-                    userId: createdByActor.userId,
-                    name: createdByActor.name,
-                    phone: createdByActor.phone,
+                    userType: supSnap.userType, // Admin | Manager | Employee
+                    userId: supSnap.userId,
+                    name: supSnap.name,
+                    phone: supSnap.phone,
                     assignedAt: now,
-                    assignedBy: createdByActor.userId, // schema: ObjectId
+                    assignedBy: (actorRef && actorRef.userId) || supSnap.userId, // schema: ObjectId
                 };
             }
             // eslint-disable-next-line no-await-in-loop
@@ -262,9 +294,9 @@ async function createPickupForClient({
     }
 
     // --- notify coordinators (fire-and-forget) ----------------------------
-    // Skipped when self-assigned — there is no triage step for a coordinator
-    // to action, so the "New Pickup Request" push would be misleading noise.
-    if (!selfAssign) try {
+    // Skipped when pre-assigned — there is no triage step for a coordinator to
+    // action, so the "New Pickup Request" push would be misleading noise.
+    if (!preAssigned) try {
         const [admins, managers] = await Promise.all([
             Admin.find({
                 canCoordinate: true,

@@ -226,6 +226,9 @@ app.use("/api/client/schedules", require("./routes/clientPortalScheduleRoutes"))
 // Client Management module — admin/coordinator pickup triage endpoints
 // (Phase 1, Chunk 2). Auth via protectTriage (Admin OR Manager+canCoordinate).
 app.use("/api/admin/pickups", require("./routes/adminPickupRoutes"));
+// Recurring pickup schedule review/approval (the "Recurring" tab in admin
+// Pickups). Same protectTriage gate.
+app.use("/api/admin/schedules", require("./routes/adminScheduleRoutes"));
 // Admin-editable waste stream list + CO2e factors.
 app.use("/api/admin/waste-categories", require("./routes/wasteCategoryRoutes"));
 // Operational KPIs for the admin dashboard.

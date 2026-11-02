@@ -38,12 +38,42 @@ const pickupScheduleSchema = new mongoose.Schema(
         startDate: { type: Date, required: true },
         endDate: { type: Date, default: null },
 
+        // Lifecycle:
+        //   pending   — created by a client, awaiting admin approval. Generates
+        //               NO pickups until approved.
+        //   active    — approved and running; the job materialises occurrences.
+        //   rejected  — admin declined the recurring request (terminal).
+        //   paused    — temporarily stopped by the client.
+        //   cancelled — stopped for good by the client.
+        //   completed — endDate passed.
+        // Default is `pending`: new client schedules must be approved before any
+        // pickup is generated. (Schedules created before this field existed, and
+        // staff-created ones, may be seeded `active` explicitly.)
         status: {
             type: String,
-            enum: ["active", "paused", "cancelled", "completed"],
-            default: "active",
+            enum: ["pending", "active", "paused", "cancelled", "completed", "rejected"],
+            default: "pending",
             index: true,
         },
+
+        // Admin approval (clientmngmt — recurring approval workflow).
+        // The default supervisor chosen at approval: every occurrence this
+        // schedule generates is auto-accepted and assigned to them, so there is
+        // no per-pickup triage. A schedule with no defaultSupervisor (e.g. a
+        // legacy active one) falls back to generating plain "requested" pickups.
+        defaultSupervisor: {
+            userType: { type: String, enum: ["Admin", "Manager", "Employee"] },
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            phone: String,
+        },
+        reviewedBy: {
+            userType: String,
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+        },
+        reviewedAt: { type: Date, default: null },
+        rejectionReason: { type: String, trim: true, maxlength: 1000 },
 
         // Generation bookkeeping (see recurringPickupJob).
         lastGeneratedDate: { type: Date, default: null }, // occurrence date of the last pickup made

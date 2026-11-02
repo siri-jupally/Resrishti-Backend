@@ -75,6 +75,35 @@ const generateDueForSchedule = async (scheduleArg, { now = new Date() } = {}) =>
         let madeOne = false;
         if (!dup) {
             try {
+                // Once an admin has approved the schedule and chosen a default
+                // supervisor, every occurrence is auto-accepted and assigned to
+                // them (no per-pickup triage). A schedule with no
+                // defaultSupervisor (e.g. a legacy active one) still generates a
+                // plain "requested" pickup the coordinator accepts.
+                const sup = schedule.defaultSupervisor;
+                const hasSup = sup && sup.userId;
+                let assignOpts = {};
+                if (hasSup) {
+                    const schedAt = new Date(occ);
+                    schedAt.setHours(10, 0, 0, 0); // default collection time
+                    assignOpts = {
+                        assignSupervisor: {
+                            userType: sup.userType,
+                            userId: sup.userId,
+                            name: sup.name,
+                            phone: sup.phone,
+                        },
+                        scheduledDate: schedAt,
+                        createdByActor:
+                            schedule.reviewedBy && schedule.reviewedBy.userId
+                                ? {
+                                      userType: schedule.reviewedBy.userType,
+                                      userId: schedule.reviewedBy.userId,
+                                      name: schedule.reviewedBy.name,
+                                  }
+                                : undefined,
+                    };
+                }
                 // recurringScheduleId is set AT creation so the unique
                 // (recurringScheduleId, requestedDate) index enforces
                 // one-per-occurrence even under concurrent runs.
@@ -85,6 +114,7 @@ const generateDueForSchedule = async (scheduleArg, { now = new Date() } = {}) =>
                     clientNotes: schedule.clientNotes,
                     siteId: schedule.site ? String(schedule.site) : undefined,
                     recurringScheduleId: schedule._id,
+                    ...assignOpts,
                 });
                 madeOne = true;
                 created += 1;

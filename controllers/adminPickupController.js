@@ -1501,4 +1501,8 @@ module.exports = {
     reassignSupervisor,
     cancelPickup,
     getSupervisorPool,
+    // Reused by the recurring-schedule approval controller.
+    resolveSupervisor,
+    buildSupervisorSnapshot,
+    actorFromReq,
 };
