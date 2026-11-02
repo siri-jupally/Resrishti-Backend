@@ -996,6 +996,30 @@ const listClientsForPickup = async (req, res) => {
     }
 };
 
+// GET /api/{role}/my-pickups/clients/:id/sites
+// A client's active sites, so the create-on-behalf form can tag which location
+// the waste is coming from (parity with the client portal's own request form).
+// Pickup-agent gated, like the rest of the create-on-behalf flow.
+const listClientSitesForPickup = async (req, res) => {
+    try {
+        const me = getCurrentUser(req);
+        if (!me || !me.doc || me.doc.canSupervise !== true) {
+            return res.status(403).json({ message: "Pickup agent access required" });
+        }
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid client id" });
+        }
+        const Site = require("../models/Site");
+        const sites = await Site.find({ client: req.params.id, isActive: true })
+            .select("name description address")
+            .sort({ name: 1 })
+            .lean();
+        return res.json({ items: sites, total: sites.length });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 // POST /api/{role}/my-pickups  { clientId, requestedDate, requestedStreams, clientNotes?, siteId? }
 const createPickupOnBehalf = async (req, res) => {
     try {
@@ -1350,6 +1374,7 @@ module.exports = {
     updatePickupStatus,
     recordWasteData,
     listClientsForPickup,
+    listClientSitesForPickup,
     createPickupOnBehalf,
     setTracking,
     pingTracking,

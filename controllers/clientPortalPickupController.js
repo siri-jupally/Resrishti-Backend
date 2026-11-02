@@ -229,6 +229,49 @@ const cancelMyPickup = async (req, res) => {
         });
         await pickup.save();
 
+        // Recurring series cancel (clientmngmt.md §7.5). When this pickup came
+        // from a recurring schedule and the client chose "cancel the whole
+        // series", also stop future generation AND cancel the schedule's other
+        // not-yet-started pickups. Pickups already en-route or done are left
+        // untouched — someone is already committed to them. `scope` defaults to
+        // "single" so an ordinary cancel is unchanged.
+        let seriesCancelled = 0;
+        const cancelSeries =
+            req.body?.scope === "series" || req.body?.cancelSeries === true;
+        if (cancelSeries && pickup.recurringScheduleId) {
+            const PickupSchedule = require("../models/PickupSchedule");
+            await PickupSchedule.updateOne(
+                {
+                    _id: pickup.recurringScheduleId,
+                    client: req.client._id,
+                    status: { $in: ["active", "paused"] },
+                },
+                { $set: { status: "cancelled", nextOccurrence: null } }
+            );
+            const siblings = await Pickup.find({
+                recurringScheduleId: pickup.recurringScheduleId,
+                client: req.client._id,
+                _id: { $ne: pickup._id },
+                status: { $in: ["requested", "accepted", "scheduled"] },
+            });
+            for (const sib of siblings) {
+                sib.status = "cancelled";
+                sib.cancelledReason =
+                    cancelledReason || "Recurring schedule cancelled by client";
+                sib.evidence.push({
+                    status: "cancelled",
+                    at: new Date(),
+                    by: {
+                        userType: "Client",
+                        userId: req.client._id,
+                        name: req.client.name,
+                    },
+                });
+                await sib.save();
+                seriesCancelled += 1;
+            }
+        }
+
         // Notify admins + coordinators that this pickup was cancelled. Same
         // recipient set as the new-request notification.
         try {
@@ -265,7 +308,9 @@ const cancelMyPickup = async (req, res) => {
             console.error("Cancellation push notify failed:", e.message);
         }
 
-        return res.json(pickup);
+        const out = pickup.toObject();
+        out.seriesCancelled = seriesCancelled;
+        return res.json(out);
     } catch (err) {
         console.error("cancelMyPickup error:", err);
         return res.status(500).json({ message: err.message });

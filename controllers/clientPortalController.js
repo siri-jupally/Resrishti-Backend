@@ -168,6 +168,14 @@ const getDashboard = async (req, res) => {
       status: "sent",
     });
 
+    // Monthly reports the client has actually been sent (Impact / GHG / CoD).
+    // Counted separately from certificates so the dashboard reflects both the
+    // per-pickup certificates AND the monthly reports the client has received.
+    const reportsReceived = await Report.countDocuments({
+      client: clientId,
+      status: "sent",
+    });
+
     // "Last contact" signal — any pickup, any status. Helps the client see
     // we're working even if the cert isn't out yet.
     const lastPickup = await Pickup.findOne({ client: clientId })
@@ -189,6 +197,7 @@ const getDashboard = async (req, res) => {
     return res.json({
       totalKgDiverted: Math.round(totalKgDiverted * 100) / 100,
       certsReceived,
+      reportsReceived,
       lastPickupAt: lastPickup?.createdAt || null,
       co2eAvoided: Math.round(co2eAvoided * 100) / 100,
       upcomingPickups,
@@ -235,12 +244,19 @@ const listMyCertificates = async (req, res) => {
 
     const filter = { client: clientId, status: statusFilter };
 
-    // A certificate cancelled before it ever left the building is not the
-    // client's business — they never held it. One cancelled after it was sent
-    // is, because they need to know the copy they have is void.
+    // A document the client never received is not their business. A plain
+    // 'sent' cert is always visible; a 'cancelled' or 'superseded' one only if
+    // it was actually sent at some point (sentAt set):
+    //   - cancelled-but-sent: they need to know the copy they hold is void.
+    //   - superseded-but-sent: it is a previously-delivered revision, kept as
+    //     proof/history. A cert revised straight from 'issued' (never sent) is
+    //     superseded WITHOUT a sentAt, so it must NOT surface here — otherwise a
+    //     correction the client never saw would appear as if it had been issued
+    //     to them.
     filter.$or = [
-      { status: { $ne: "cancelled" } },
+      { status: { $nin: ["cancelled", "superseded"] } },
       { status: "cancelled", sentAt: { $ne: null } },
+      { status: "superseded", sentAt: { $ne: null } },
     ];
 
     // Count + page in parallel to keep latency low on big histories.
@@ -304,6 +320,13 @@ const downloadMyCertificate = async (req, res) => {
       return res.status(404).json({ message: "Certificate not found" });
     }
 
+    // A superseded cert is downloadable only if it was actually sent — a
+    // revision made straight from 'issued' is superseded with no sentAt and
+    // was never the client's to hold. Same 404 so the endpoint stays silent.
+    if (cert.status === "superseded" && !cert.sentAt) {
+      return res.status(404).json({ message: "Certificate not found" });
+    }
+
     if (!cert.pdf || !cert.pdf.key) {
       // Either a draft (no PDF rendered yet) or a rendering failure that left
       // the cert without an S3 object. Both are 404 from the client's POV.
@@ -355,6 +378,14 @@ const listMyReports = async (req, res) => {
     }
 
     const filter = { client: clientId, status: statusFilter };
+    // A 'superseded' report is only the client's to see if it was actually
+    // sent. Revising an issued-but-never-sent report supersedes it without a
+    // sentAt, and that copy must stay internal. A plain 'sent' report is
+    // always visible; a previously-sent-then-superseded one stays as history.
+    filter.$or = [
+      { status: "sent" },
+      { status: "superseded", sentAt: { $ne: null } },
+    ];
     if (["impact", "ghg", "cod"].includes(req.query.type)) filter.type = req.query.type;
     const year = parseInt(req.query.year, 10);
     if (Number.isInteger(year)) filter.periodYear = year;
@@ -404,6 +435,13 @@ const downloadMyReport = async (req, res) => {
     // this client but has not been released. Identical guard to
     // downloadMyCertificate; see that handler for the full rationale.
     if (!CLIENT_VISIBLE_REPORT_STATUSES.includes(report.status)) {
+      return res.status(404).json({ message: "Report not found" });
+    }
+
+    // Superseded is downloadable only if it was actually sent — a report
+    // revised straight from 'issued' is superseded with no sentAt and was
+    // never released to the client.
+    if (report.status === "superseded" && !report.sentAt) {
       return res.status(404).json({ message: "Report not found" });
     }
 

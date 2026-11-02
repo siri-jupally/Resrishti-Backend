@@ -40,6 +40,8 @@ const factory = (roleAuth, opts = {}) => {
     // Literal "/clients" before the "/" list route.
     if (opts.allowCreate) {
         r.get("/clients", roleAuth, ctrl.listClientsForPickup);
+        // Literal "/clients/:id/sites" before the "/:id" pickup routes below.
+        r.get("/clients/:id/sites", roleAuth, ctrl.listClientSitesForPickup);
         r.post("/", roleAuth, ctrl.createPickupOnBehalf);
     }
     r.get("/", roleAuth, ctrl.listMyPickups);

@@ -31,8 +31,28 @@ const Employee = require("../models/Employee");
 const Client = require("../models/Client");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { sendEmail } = require("../utils/emailService");
+const { getIo } = require("../socketHandler");
 
 // ---------- helpers ----------------------------------------------------
+
+/**
+ * Push a pickup status change to anyone watching its room (the client portal
+ * and the admin detail view join `pickup_<id>` via socket). Best-effort — a
+ * socket failure must never break the state transition that already saved.
+ */
+const emitPickupStatus = (pickup, extra = {}) => {
+    try {
+        getIo()
+            .to(`pickup_${pickup._id}`)
+            .emit("pickup:status-updated", {
+                pickupId: pickup._id,
+                status: pickup.status,
+                ...extra,
+            });
+    } catch (socketErr) {
+        console.error("Socket emit error (pickup):", socketErr.message || socketErr);
+    }
+};
 
 /**
  * Final authorization gate per handler. protectTriage already pre-screens,
@@ -538,6 +558,7 @@ const acceptPickup = async (req, res) => {
             await safeEmail(pickup.client.contactEmail, subject, text, html);
         }
 
+        emitPickupStatus(pickup, { scheduledDate: pickup.scheduledDate });
         return res.json(pickup);
     } catch (err) {
         console.error("acceptPickup error:", err);
@@ -641,6 +662,7 @@ const rejectPickup = async (req, res) => {
             await safeEmail(pickup.client.contactEmail, subject, text, html);
         }
 
+        emitPickupStatus(pickup, { rejectionReason: pickup.rejectionReason });
         return res.json(pickup);
     } catch (err) {
         console.error("rejectPickup error:", err);
@@ -963,6 +985,7 @@ const cancelPickup = async (req, res) => {
             }
         }
 
+        emitPickupStatus(pickup, { cancelledReason: pickup.cancelledReason });
         return res.json(pickup);
     } catch (err) {
         console.error("cancelPickup error:", err);
@@ -1153,6 +1176,7 @@ const reschedulePickup = async (req, res) => {
             }
         }
 
+        emitPickupStatus(pickup, { scheduledDate: pickup.scheduledDate });
         return res.json(pickup);
     } catch (err) {
         console.error("reschedulePickup error:", err);
