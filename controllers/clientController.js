@@ -265,8 +265,14 @@ const updateClient = async (req, res) => {
 // Sites and the client's own invite / reset tokens are not history; they belong
 // to the client and go with it.
 //
+// Guard: if the client still has any LIVE pickup (anything not collection-
+// complete or ended), neither path runs — we 409 and ask the admin to resolve
+// those pickups first, so a client is never removed while a crew is mid-run for
+// it.
+//
 // Responses: { ok: true, mode: 'deleted' } or
-//            { ok: true, mode: 'archived', references: { pickups, certificates, reports } }
+//            { ok: true, mode: 'archived', references: { pickups, certificates, reports } } or
+//            409 { code: 'ACTIVE_PICKUPS', activePickups } when blocked
 const deleteClient = async (req, res) => {
     try {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -284,11 +290,34 @@ const deleteClient = async (req, res) => {
         const Pickup = require("../models/Pickup");
         const Certificate = require("../models/Certificate");
         const Report = require("../models/Report");
-        const [pickups, certificates, reports] = await Promise.all([
+
+        // A pickup is "live" until it is collection-complete (processed / cert-* /
+        // closed) or has ended (cancelled / rejected / failed / no-show). While a
+        // live pickup exists there is still a crew working for this client, so the
+        // client cannot be removed OR archived out from under that work — the
+        // admin resolves those pickups first. This closes the integrity hole
+        // where a deleted client's in-flight pickup kept advancing in the field.
+        const FINISHED_STATUSES = [
+            ...Pickup.CLOSED_EQUIVALENT_STATUSES,
+            "cancelled", "rejected", "failed", "no-show",
+        ];
+        const [pickups, certificates, reports, activePickups] = await Promise.all([
             Pickup.countDocuments({ client: client._id }),
             Certificate.countDocuments({ client: client._id }),
             Report.countDocuments({ client: client._id }),
+            Pickup.countDocuments({
+                client: client._id,
+                status: { $nin: FINISHED_STATUSES },
+            }),
         ]);
+
+        if (activePickups > 0) {
+            return res.status(409).json({
+                message: `This client has ${activePickups} active pickup${activePickups === 1 ? "" : "s"} still in progress. Cancel or complete ${activePickups === 1 ? "it" : "them"} before deleting the client.`,
+                code: "ACTIVE_PICKUPS",
+                activePickups,
+            });
+        }
 
         if (pickups === 0 && certificates === 0 && reports === 0) {
             const Site = require("../models/Site");
