@@ -364,7 +364,7 @@ const listMyPickups = async (req, res) => {
 
         const [items, total] = await Promise.all([
             Pickup.find(filter)
-                .populate("client", "name contactName billingAddress")
+                .populate("client", "name contactName contactPhone billingAddress")
                 .sort({ scheduledDate: 1, createdAt: 1 })
                 .skip(offset)
                 .limit(limit),
