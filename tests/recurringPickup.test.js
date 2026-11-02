@@ -16,7 +16,8 @@ const Client = require("../models/Client");
 const PickupSchedule = require("../models/PickupSchedule");
 const wasteCategories = require("../utils/wasteCategories");
 const ctrl = require("../controllers/clientPortalScheduleController");
-const { generateDueForSchedule } = require("../services/recurringPickupJob");
+const { generateDueForSchedule, LEAD_DAYS } = require("../services/recurringPickupJob");
+const MAX_PER_RUN = 12; // mirrors MAX_PER_SCHEDULE_PER_RUN safety cap in the job
 
 let mongod, client;
 const mockRes = () => { const r = { statusCode: 200, body: null, status(c) { r.statusCode = c; return r; }, json(d) { r.body = d; return r; } }; return r; };
@@ -33,6 +34,15 @@ beforeEach(async () => {
 });
 
 const create = async (body) => { const res = mockRes(); await ctrl.createSchedule({ client, body }, res); return res; };
+
+// A client schedule is created 'pending' and waits for admin approval; approval
+// flips it to 'active', which is the only status the generation engine runs on.
+// The engine reads cadence + startDate off the row, so flipping the status here
+// reproduces the post-approval state without the rest of the approve plumbing.
+const activate = async (id) => {
+    await PickupSchedule.updateOne({ _id: id }, { $set: { status: "active" } });
+    return PickupSchedule.findById(id);
+};
 
 describe("createSchedule — validation", () => {
     it("rejects a bad cadence", async () => {
@@ -52,36 +62,47 @@ describe("createSchedule — validation", () => {
 });
 
 describe("createSchedule — generation", () => {
-    it("creates the schedule and generates the first due pickup (linked, requested)", async () => {
+    it("is created pending, then generates the first due pickup once active (linked, requested)", async () => {
         const res = await create({ cadence: { type: "weekly", weekday: todayWeekday() }, requestedStreams: ["plastic", "paper"] });
         expect(res.statusCode).toBe(201);
-        expect(res.body.status).toBe("active");
+        expect(res.body.status).toBe("pending"); // client schedules await admin approval
+        expect(await Pickup.countDocuments({ recurringScheduleId: res.body._id })).toBe(0); // nothing until active
 
-        const pickups = await Pickup.find({ recurringScheduleId: res.body._id });
-        expect(pickups).toHaveLength(1);                       // today matches the weekday → due now
+        const schedule = await activate(res.body._id);
+        await generateDueForSchedule(schedule);
+
+        const pickups = await Pickup.find({ recurringScheduleId: res.body._id }).sort({ requestedDate: 1 });
+        // Weekly: today plus one per week inside the LEAD_DAYS horizon.
+        expect(pickups).toHaveLength(Math.floor(LEAD_DAYS / 7) + 1);
         expect(pickups[0].status).toBe("requested");
         expect(pickups[0].requestedStreams).toEqual(["plastic", "paper"]);
-        expect(ymd(pickups[0].requestedDate)).toBe(ymd(new Date()));
+        expect(ymd(pickups[0].requestedDate)).toBe(ymd(new Date())); // the first is due today
     });
 
     it("is idempotent — re-running makes no duplicate", async () => {
         const res = await create({ cadence: { type: "weekly", weekday: todayWeekday() }, requestedStreams: ["plastic"] });
-        const schedule = await PickupSchedule.findById(res.body._id);
+        const schedule = await activate(res.body._id);
         await generateDueForSchedule(schedule);
+        const afterFirst = await Pickup.countDocuments({ recurringScheduleId: res.body._id });
         await generateDueForSchedule(schedule);
-        expect(await Pickup.countDocuments({ recurringScheduleId: res.body._id })).toBe(1);
+        expect(await Pickup.countDocuments({ recurringScheduleId: res.body._id })).toBe(afterFirst); // unchanged
     });
 
-    it("materialises every occurrence within the lead window (daily → 6 across today..+5)", async () => {
+    it("materialises occurrences within the lead window, capped per run (daily)", async () => {
         const res = await create({ cadence: { type: "everyNDays", intervalDays: 1 }, requestedStreams: ["plastic"] });
         expect(res.statusCode).toBe(201);
-        expect(await Pickup.countDocuments({ recurringScheduleId: res.body._id })).toBe(6);
+        const schedule = await activate(res.body._id);
+        await generateDueForSchedule(schedule);
+        // Daily would be LEAD_DAYS+1 occurrences, but one run is capped at MAX_PER_RUN.
+        expect(await Pickup.countDocuments({ recurringScheduleId: res.body._id })).toBe(Math.min(LEAD_DAYS + 1, MAX_PER_RUN));
     });
 
     it("stops at endDate and marks the schedule completed", async () => {
         const today = ymd(new Date());
         const res = await create({ cadence: { type: "everyNDays", intervalDays: 1 }, requestedStreams: ["plastic"], startDate: today, endDate: today });
         expect(res.statusCode).toBe(201);
+        const schedule = await activate(res.body._id);
+        await generateDueForSchedule(schedule);
         expect(await Pickup.countDocuments({ recurringScheduleId: res.body._id })).toBe(1); // only today
         const fresh = await PickupSchedule.findById(res.body._id);
         expect(fresh.status).toBe("completed");
@@ -92,6 +113,8 @@ describe("pause / resume / cancel", () => {
     it("pause stops generation; resume catches up; cancel is terminal", async () => {
         const created = await create({ cadence: { type: "everyNDays", intervalDays: 1 }, requestedStreams: ["plastic"] });
         const id = created.body._id;
+        const active = await activate(id);          // admin approval → active
+        await generateDueForSchedule(active);       // materialise the first run
 
         // pause
         const p = mockRes(); await ctrl.pauseSchedule({ client, params: { id } }, p);

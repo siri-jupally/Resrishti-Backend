@@ -89,7 +89,7 @@ describe("reportController — generate a monthly CoD report", () => {
         expect(res.statusCode).toBe(201);
         const report = res.body.report;
         expect(report.type).toBe("cod");
-        expect(report.reportNumber).toMatch(/^MCD-\d{4}-\d{4}$/);
+        expect(report.reportNumber).toMatch(/^CoD-\d{4}-\d{4}$/);
         expect(report.status).toBe("draft");
         expect(report.codSnapshot.totalKg).toBe(420);
         expect(report.codSnapshot.rows.find((r) => r.key === "plastic").qtyKg).toBe(300);

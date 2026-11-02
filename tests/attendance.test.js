@@ -17,6 +17,12 @@
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 
+// Check-in now requires a live selfie that the controller uploads to S3. Stub
+// the upload so the tests don't reach out to S3.
+jest.mock("../utils/s3", () => ({
+    uploadCheckinPhoto: jest.fn().mockResolvedValue({ key: "checkin-photos/test.jpg", bucket: "bucket" }),
+}));
+
 // Models
 const Attendance = require("../models/Attendance");
 const AttendancePolicy = require("../models/AttendancePolicy");
@@ -51,6 +57,10 @@ function mockReq(overrides = {}) {
         query: {},
         params: {},
         headers: {},
+        // Check-in requires a live selfie (multer .single("photo") → req.file).
+        // Default one in so check-in requests are valid; pass `file: null` to
+        // exercise the missing-photo guard.
+        file: { buffer: Buffer.from("selfie"), mimetype: "image/jpeg" },
         ...overrides,
     };
 }
@@ -338,6 +348,10 @@ describe("Check-In Logic", () => {
             checkOutMinTime: "17:00",
             workingHoursPerDay: 8,
             halfDayThresholdHours: 4,
+            // WFH/remote are enabled by default; drop the approval requirement so
+            // these tests can exercise those modes without a pre-approved request.
+            requireApprovalForWfh: false,
+            requireApprovalForRemote: false,
         });
     });
 
@@ -536,7 +550,8 @@ describe("Check-Out Logic", () => {
         await checkOut(req, res);
 
         expect(res.statusCode).toBe(400);
-        expect(res.body.message).toBe("Already checked out today");
+        // Sessions-based checkout: a closed session reports no open session.
+        expect(res.body.message).toBe("No active session to check out from");
     });
 
     test("should calculate working hours correctly", async () => {
@@ -1982,26 +1997,11 @@ describe("Frontend-Backend Contract - Response Shapes", () => {
         });
     });
 
-    test("BUG: Admin reports frontend expects 'summary' and 'employees' keys but backend sends 'orgSummary' and 'employeeReports'", async () => {
-        // Frontend AdminAttendanceTab.jsx line 598: data?.summary
-        // Frontend AdminAttendanceTab.jsx line 605: data.summary.avgAttendance
-        // Frontend AdminAttendanceTab.jsx line 609: data.summary.totalWorkingDays
-        // Frontend AdminAttendanceTab.jsx line 613: data.summary.totalLateCheckins
-        // Frontend AdminAttendanceTab.jsx line 634: data?.employees
-        //
-        // Backend attendanceAdminController.js line 198 sends:
-        //   { from, to, orgSummary, employeeReports }
-        //
-        // The frontend looks for `data.summary` but the backend sends `data.orgSummary`.
-        // The frontend looks for `data.employees` but the backend sends `data.employeeReports`.
-        //
-        // Additionally, the backend orgSummary does NOT include:
-        //   - avgAttendance (frontend tries to display data.summary.avgAttendance)
-        //   - totalWorkingDays (frontend tries to display data.summary.totalWorkingDays)
-        //   - totalLateCheckins (frontend tries to display data.summary.totalLateCheckins)
-        //
-        // The backend sends: totalEmployees, totalRecords, totalPresent, totalAbsent,
-        //   totalLeave, totalWfh, totalLate
+    test("Admin reports response matches the frontend contract (summary + employees)", async () => {
+        // AdminAttendanceTab.jsx reads data.summary.{avgAttendance, totalWorkingDays,
+        // totalLateCheckins} and data.employees. getReports now returns exactly that
+        // (the earlier orgSummary / employeeReports mismatch is fixed; those keys stay
+        // alongside for back-compat).
 
         await Attendance.create({
             employee: employee._id,
@@ -2016,18 +2016,17 @@ describe("Frontend-Backend Contract - Response Shapes", () => {
         const res = mockRes();
         await getReports(req, res);
 
-        // Backend sends these keys:
+        // The shape the frontend actually reads (was the bug; now fixed).
+        expect(res.body).toHaveProperty("summary");
+        expect(res.body).toHaveProperty("employees");
+        expect(res.body.summary).toHaveProperty("avgAttendance");
+        expect(res.body.summary).toHaveProperty("totalWorkingDays");
+        expect(res.body.summary).toHaveProperty("totalLateCheckins");
+        expect(Array.isArray(res.body.employees)).toBe(true);
+
+        // Legacy keys kept alongside for back-compat.
         expect(res.body).toHaveProperty("orgSummary");
         expect(res.body).toHaveProperty("employeeReports");
-
-        // Frontend expects these keys (which DON'T exist):
-        expect(res.body).not.toHaveProperty("summary");
-        expect(res.body).not.toHaveProperty("employees");
-
-        // Frontend also expects fields that backend doesn't send:
-        expect(res.body.orgSummary).not.toHaveProperty("avgAttendance");
-        expect(res.body.orgSummary).not.toHaveProperty("totalWorkingDays");
-        expect(res.body.orgSummary).not.toHaveProperty("totalLateCheckins");
     });
 
     test("BUG: Admin reports frontend expects 'month' param but backend expects 'from'/'to' date range", () => {
