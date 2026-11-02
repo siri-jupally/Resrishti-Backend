@@ -205,13 +205,19 @@ describe("partial collection", () => {
 
 describe("reschedule", () => {
     const asAdmin = (pickup, body) => mockReq({ admin, params: { id: String(pickup._id) }, body });
+    // Reschedule targets must be in the FUTURE — reschedulePickup rejects a past
+    // date — so dates are computed relative to "now", not hardcoded (a fixed
+    // date silently rots into "the past" and breaks these tests later).
+    const daysFromNow = (nDays) => { const d = new Date(); d.setUTCHours(0, 0, 0, 0); d.setUTCDate(d.getUTCDate() + nDays); return d; };
+    const isoDay = (d) => d.toISOString().slice(0, 10);
 
     test("moves the date and keeps the previous one on record", async () => {
-        const first = new Date("2026-04-01T00:00:00Z");
+        const first = daysFromNow(14);
+        const target = isoDay(daysFromNow(21));
         const pickup = await makePickup({ status: "scheduled", scheduledDate: first });
         const res = mockRes();
         await adminPickups.reschedulePickup(
-            asAdmin(pickup, { scheduledDate: "2026-04-08", reason: "Client asked to move it" }),
+            asAdmin(pickup, { scheduledDate: target, reason: "Client asked to move it" }),
             res
         );
         expect(res.statusCode).toBe(200);
@@ -219,14 +225,14 @@ describe("reschedule", () => {
         expect(saved.scheduleHistory).toHaveLength(1);
         expect(saved.scheduleHistory[0].from.toISOString()).toBe(first.toISOString());
         expect(saved.scheduleHistory[0].reason).toMatch(/Client asked/);
-        expect(saved.scheduledDate.toISOString().slice(0, 10)).toBe("2026-04-08");
+        expect(saved.scheduledDate.toISOString().slice(0, 10)).toBe(target);
         expect(saved.status).toBe("scheduled");
     });
 
     test("a postponed pickup goes back on the calendar", async () => {
         const pickup = await makePickup({ status: "postponed" });
         await adminPickups.reschedulePickup(
-            asAdmin(pickup, { scheduledDate: "2026-04-08", reason: "Rebooked" }),
+            asAdmin(pickup, { scheduledDate: isoDay(daysFromNow(21)), reason: "Rebooked" }),
             mockRes()
         );
         expect((await Pickup.findById(pickup._id)).status).toBe("scheduled");
@@ -235,7 +241,7 @@ describe("reschedule", () => {
     test("a reason and a valid date are both required", async () => {
         const pickup = await makePickup({ status: "scheduled" });
         const noReason = mockRes();
-        await adminPickups.reschedulePickup(asAdmin(pickup, { scheduledDate: "2026-04-08" }), noReason);
+        await adminPickups.reschedulePickup(asAdmin(pickup, { scheduledDate: isoDay(daysFromNow(21)) }), noReason);
         expect(noReason.statusCode).toBe(400);
 
         const badDate = mockRes();
@@ -247,7 +253,7 @@ describe("reschedule", () => {
         const pickup = await makePickup({ status: "en-route" });
         const res = mockRes();
         await adminPickups.reschedulePickup(
-            asAdmin(pickup, { scheduledDate: "2026-04-08", reason: "too late" }),
+            asAdmin(pickup, { scheduledDate: isoDay(daysFromNow(21)), reason: "too late" }),
             res
         );
         expect(res.statusCode).toBe(409);
