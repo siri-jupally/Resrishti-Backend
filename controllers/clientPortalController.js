@@ -169,19 +169,23 @@ const getDashboard = async (req, res) => {
     // visibility rule as those lists — sent, or a previously-sent revision now
     // superseded.
     const visibleSent = { $or: [{ status: "sent" }, { status: "superseded", sentAt: { $ne: null } }] };
-    const [perPickupCerts, codReports] = await Promise.all([
-      Certificate.countDocuments({ client: clientId, ...visibleSent }),
-      Report.countDocuments({ client: clientId, type: "cod", ...visibleSent }),
+    // Count DISTINCT documents, not rows: revisions share a certNumber /
+    // reportNumber, and a revised-and-resent doc has several visible revisions.
+    // Counting rows made one revised CoD read as two "received" certificates —
+    // matching the Certificates tab, which shows one card per number.
+    const [perPickupCertNos, codReportNos] = await Promise.all([
+      Certificate.distinct("certNumber", { client: clientId, ...visibleSent }),
+      Report.distinct("reportNumber", { client: clientId, type: "cod", ...visibleSent }),
     ]);
-    const certsReceived = perPickupCerts + codReports;
+    const certsReceived = perPickupCertNos.length + codReportNos.length;
 
     // "Reports received" = the analytical reports only (Impact + GHG); the
     // monthly CoD is counted under certificates above, matching the Reports tab.
-    const reportsReceived = await Report.countDocuments({
+    const reportsReceived = (await Report.distinct("reportNumber", {
       client: clientId,
       type: { $in: ["impact", "ghg"] },
       ...visibleSent,
-    });
+    })).length;
 
     // "Last contact" signal — any pickup, any status. Helps the client see
     // we're working even if the cert isn't out yet.
