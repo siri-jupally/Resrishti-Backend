@@ -163,17 +163,24 @@ const getDashboard = async (req, res) => {
 
     // Only `sent` certs are visible to the client — issued-but-not-yet-sent
     // are still being reviewed by the manager and shouldn't show up here.
-    const certsReceived = await Certificate.countDocuments({
-      client: clientId,
-      status: "sent",
-    });
+    // "Certificates received" = every Certificate of Disposal the client can
+    // see, to match the Certificates tab: the monthly CoD reports (the primary
+    // document clients want) PLUS the occasional per-pickup certificate. Same
+    // visibility rule as those lists — sent, or a previously-sent revision now
+    // superseded.
+    const visibleSent = { $or: [{ status: "sent" }, { status: "superseded", sentAt: { $ne: null } }] };
+    const [perPickupCerts, codReports] = await Promise.all([
+      Certificate.countDocuments({ client: clientId, ...visibleSent }),
+      Report.countDocuments({ client: clientId, type: "cod", ...visibleSent }),
+    ]);
+    const certsReceived = perPickupCerts + codReports;
 
-    // Monthly reports the client has actually been sent (Impact / GHG / CoD).
-    // Counted separately from certificates so the dashboard reflects both the
-    // per-pickup certificates AND the monthly reports the client has received.
+    // "Reports received" = the analytical reports only (Impact + GHG); the
+    // monthly CoD is counted under certificates above, matching the Reports tab.
     const reportsReceived = await Report.countDocuments({
       client: clientId,
-      status: "sent",
+      type: { $in: ["impact", "ghg"] },
+      ...visibleSent,
     });
 
     // "Last contact" signal — any pickup, any status. Helps the client see
