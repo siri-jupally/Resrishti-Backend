@@ -21,6 +21,7 @@ const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
 const Client = require("../models/Client");
 const Certificate = require("../models/Certificate");
+const Report = require("../models/Report");
 const { factorForStream, refreshCache, activeCategories } =
     require("../utils/wasteCategories");
 
@@ -133,6 +134,7 @@ const getOverview = async (req, res) => {
             certCounts,
             activeClients,
             filteredClients,
+            monthlyCodSent,
         ] = await Promise.all([
             // Pickup counts per status, folded into stages below.
             Pickup.aggregate([
@@ -270,6 +272,21 @@ const getOverview = async (req, res) => {
             base.client
                 ? Client.countDocuments({ _id: base.client, status: "active" })
                 : Promise.resolve(null),
+
+            // Monthly Certificates of Disposal delivered — the main client
+            // document. Counted alongside the per-pickup certs so "Certificates
+            // sent" reflects every disposal certificate we sent, not only the
+            // rare per-pickup ones. Only the current revision carries status
+            // 'sent' (older revisions are 'superseded'), so a revised CoD is
+            // never double-counted. Same client + date filters as the certs.
+            Report.countDocuments({
+                type: "cod",
+                status: "sent",
+                ...(base.client ? { client: base.client } : {}),
+                ...(from || to
+                    ? { createdAt: { ...(from ? { $gte: from } : {}), ...(to ? { $lte: to } : {}) } }
+                    : {}),
+            }),
         ]);
 
         // ---- fold status counts into stages -----------------------------
@@ -387,7 +404,7 @@ const getOverview = async (req, res) => {
                 // Drafted or issued but not yet in the client's hands.
                 pendingCertificates: (certByStatus.draft || 0) + (certByStatus.issued || 0),
                 certificatesIssued: certByStatus.issued || 0,
-                certificatesSent: certByStatus.sent || 0,
+                certificatesSent: (certByStatus.sent || 0) + (monthlyCodSent || 0),
                 certificatesCancelled: certByStatus.cancelled || 0,
                 // With a category filter on, this is that category's weight.
                 totalWasteKg: round1(totalWasteKg),
