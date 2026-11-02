@@ -1077,6 +1077,10 @@ const reschedulePickup = async (req, res) => {
         if (!scheduledDate || Number.isNaN(when.getTime())) {
             return res.status(400).json({ message: "A valid scheduledDate is required" });
         }
+        // A pickup can't be rescheduled into the past — same guard as accept.
+        if (when.getTime() < Date.now()) {
+            return res.status(400).json({ message: "scheduledDate cannot be in the past" });
+        }
         const why = String(reason || "").trim();
         if (!why) {
             return res.status(400).json({ message: "reason is required" });
