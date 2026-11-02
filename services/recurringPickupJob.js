@@ -20,7 +20,13 @@ const {
     nextOccurrenceOnOrAfter, nextOccurrenceAfter, atMidnight, addDays,
 } = require("../utils/recurrence");
 
-const LEAD_DAYS = 5;                 // how far ahead to materialise an occurrence
+// How far ahead to materialise an occurrence. Kept generous (a month by
+// default) so an approved recurring pickup shows up for the assigned agent and
+// the client straight away, instead of only appearing 5 days before it is due —
+// which made approved schedules look like nothing had happened. Tunable via
+// RECURRING_LEAD_DAYS without a code change. MAX_PER_SCHEDULE_PER_RUN still caps
+// a single run, so a very frequent cadence can't materialise an unbounded set.
+const LEAD_DAYS = Math.max(1, parseInt(process.env.RECURRING_LEAD_DAYS, 10) || 31);
 const MAX_PER_SCHEDULE_PER_RUN = 12; // safety cap against a runaway loop
 
 const ymd = (d) =>
