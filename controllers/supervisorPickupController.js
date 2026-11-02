@@ -195,6 +195,14 @@ const PHOTO_REQUIRED_FOR = new Set([
 // for these, so the reason is the only record of what happened — hence required.
 const FIELD_TERMINAL = new Set(["failed", "no-show"]);
 
+// Statuses BEFORE the waste has been collected. Only a pickup still in one of
+// these can be "overdue" (missed): once collection has started the run should be
+// finished, never closed as overdue, so collected waste is never stranded.
+const PRE_COLLECTION = new Set([
+    "accepted", "scheduled", "en-route", "at-client",
+    "v2-departed", "v2-empty-weighed", "v2-at-client", "v2-loading",
+]);
+
 // User-facing notification copy per status (sent to the client's push
 // subscription if they have one). Quiet statuses are intentionally absent.
 const CLIENT_NOTIFICATION = {
@@ -418,6 +426,27 @@ const updatePickupStatus = async (req, res) => {
         const legacy = Pickup.isLegacyPipeline(pickup);
         const allowedMap = legacy ? ALLOWED_NEXT : ALLOWED_NEXT_V2;
         const photoRequired = legacy ? PHOTO_REQUIRED_FOR : PHOTO_REQUIRED_FOR_V2;
+
+        // Overdue guard: a not-yet-collected pickup whose scheduled day has
+        // passed can no longer be collected — only closed with a reason (failed
+        // / no-show). Block every forward/progress transition (and postpone) so
+        // a stale assignment can't be "completed" days late and land in the
+        // wrong month's figures. Only applies pre-collection, so collected waste
+        // is never stranded; the close-with-reason path stays open.
+        if (
+            pickup.scheduledDate &&
+            PRE_COLLECTION.has(pickup.status) &&
+            !FIELD_TERMINAL.has(newStatus)
+        ) {
+            const startToday = new Date();
+            startToday.setHours(0, 0, 0, 0);
+            if (new Date(pickup.scheduledDate) < startToday) {
+                return res.status(409).json({
+                    message: "This pickup is overdue — its scheduled day has passed, so it can no longer be collected. Close it with a reason instead.",
+                    overdue: true,
+                });
+            }
+        }
 
         // State-machine guard.
         const allowed = allowedMap[pickup.status] || [];
