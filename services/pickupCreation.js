@@ -328,6 +328,30 @@ async function createPickupForClient({
         console.error("Coordinator push notify failed:", e.message);
     }
 
+    // When the pickup was auto-assigned to a specific supervisor (the recurring
+    // job's approved default supervisor), notify THEM — same as the manual
+    // accept flow does — so an auto-generated assignment isn't a surprise.
+    if (assignSupervisor && supSnap) try {
+        const Employee = require("../models/Employee");
+        const SupModel = { Admin, Manager, Employee }[supSnap.userType];
+        const supUser = SupModel
+            ? await SupModel.findById(supSnap.userId).select("pushSubscription").lean()
+            : null;
+        if (supUser && supUser.pushSubscription) {
+            const seg = supSnap.userType === "Admin" ? "/admin" : supSnap.userType === "Manager" ? "/manager" : "/employee";
+            const whenStr = pickup.scheduledDate ? new Date(pickup.scheduledDate).toLocaleDateString() : "an upcoming date";
+            await sendPush(supUser.pushSubscription, {
+                title: "New Pickup Assignment",
+                body: `${client.name} — recurring pickup ${pickup.pickupID} on ${whenStr}`,
+                icon: "/android-chrome-512x512.png",
+                tag: `pickup-assigned-${pickup._id}`,
+                data: { url: `${seg}/dashboard?tab=mypickups&id=${pickup._id}` },
+            });
+        }
+    } catch (e) {
+        console.error("Supervisor assign push failed:", e.message);
+    }
+
     return pickup;
 }
 
