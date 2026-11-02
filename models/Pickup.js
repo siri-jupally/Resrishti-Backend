@@ -426,9 +426,15 @@ const V2_FIELD_STATUSES = [
  * once the pickup is weighed/closed or at any terminal state. Mirrored on the
  * frontend (lib/pickupStatus.js TRACKING_ACTIVE_STATUSES).
  */
+// Live tracking is active only while the vehicle is in transit or at the
+// client, and STOPS the moment it reaches the facility — the journey is over,
+// there's nothing left to track, and the agent is back at the company site.
+// So 'at-facility' (v1) and 'v2-at-facility' are deliberately excluded; once a
+// pickup hits either, isTrackingLive() returns false and updatePickupStatus
+// stamps tracking.endedAt, so the client card disappears and agent pings stop.
 const TRACKING_ACTIVE_STATUSES = [
-    "en-route", "at-client", "picked-up", "at-facility",
-    ...V2_FIELD_STATUSES,
+    "en-route", "at-client", "picked-up",
+    ...V2_FIELD_STATUSES.filter((s) => s !== "v2-at-facility"),
 ];
 
 // Most GPS points we keep per pickup. At one point every ~10-15s a long pickup
