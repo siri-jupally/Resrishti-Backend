@@ -95,6 +95,19 @@ async function createPickupForClient({
     // Only honoured when createdByActor is set: a client requesting their own
     // pickup can never book it in the past, however the request is crafted.
     allowPastDate = false,
+    // Set when the recurring-pickup job materialises an occurrence — stamped on
+    // the doc at creation so the (recurringScheduleId, requestedDate) unique
+    // index enforces one-pickup-per-occurrence atomically.
+    recurringScheduleId = null,
+    // A supervisor snapshot ({ userType, userId, name, phone }) to assign the
+    // pickup to at creation. Used by the recurring job once an admin has
+    // approved the schedule and chosen a default supervisor: the occurrence is
+    // created already "accepted" and assigned, skipping per-pickup triage.
+    // Takes precedence over assignToActor.
+    assignSupervisor = null,
+    // Explicit scheduled datetime for a pre-assigned pickup; falls back to the
+    // requestedDate when omitted.
+    scheduledDate = null,
 }) {
     if (!client || !client._id) {
         throw new PickupCreationError(400, "A valid client is required");
@@ -183,15 +196,38 @@ async function createPickupForClient({
         ? { userType: createdByActor.userType, userId: createdByActor.userId, name: createdByActor.name }
         : null;
 
-    // Audit entry recording the staff member who created it (and self-assignment
-    // when applicable). Only added for the staff flow, so the client
-    // self-service path is unchanged.
+    // A pre-assigned pickup skips triage: created "accepted" with a supervisor
+    // already on it. Two sources — an explicit supervisor snapshot (the
+    // recurring job's approved default supervisor) or self-assign to the
+    // creating agent. The explicit snapshot wins.
+    const supSnap = assignSupervisor
+        ? {
+              userType: assignSupervisor.userType,
+              userId: assignSupervisor.userId,
+              name: assignSupervisor.name,
+              phone: assignSupervisor.phone,
+          }
+        : selfAssign
+        ? {
+              userType: createdByActor.userType,
+              userId: createdByActor.userId,
+              name: createdByActor.name,
+              phone: createdByActor.phone,
+          }
+        : null;
+    const preAssigned = Boolean(supSnap);
+
+    // Audit entry recording how the pickup was created and (when applicable) who
+    // it was assigned to. Only added for the staff / recurring flows, so the
+    // client self-service path is byte-for-byte unchanged.
     const evidence = createdByActor
         ? [
               {
-                  status: selfAssign ? "accepted" : "requested",
+                  status: preAssigned ? "accepted" : "requested",
                   notes: (
-                      selfAssign
+                      assignSupervisor
+                          ? `Auto-created from approved recurring schedule; assigned to ${assignSupervisor.name || "supervisor"}`
+                          : selfAssign
                           ? `Created & self-assigned by ${createdByActor.userType} ${createdByActor.name || ""}`
                           : `Created on behalf of client by ${createdByActor.userType} ${createdByActor.name || ""}`
                   ).trim() + (isPast ? " — backdated" : ""),
@@ -218,23 +254,27 @@ async function createPickupForClient({
                 requestedDate: rd,
                 requestedStreams,
                 clientNotes,
-                status: selfAssign ? "accepted" : "requested",
+                // Every NEW pickup runs the v2 (7-stage) flow. Set explicitly —
+                // the model default is 1 so pre-existing rows stay legacy.
+                pipelineVersion: 2,
+                status: preAssigned ? "accepted" : "requested",
+                ...(recurringScheduleId ? { recurringScheduleId } : {}),
                 ...(evidence ? { evidence } : {}),
             };
-            if (selfAssign) {
+            if (preAssigned) {
                 // Mirror what admin acceptPickup sets: accepted + scheduled +
                 // supervisor, so the pickup follows the normal field lifecycle
                 // from "accepted" onward — just without a triage round-trip.
-                doc.scheduledDate = rd;
+                doc.scheduledDate = scheduledDate ? new Date(scheduledDate) : rd;
                 doc.acceptedAt = now;
-                doc.acceptedBy = actorRef;
+                doc.acceptedBy = actorRef || { userType: supSnap.userType, userId: supSnap.userId, name: supSnap.name };
                 doc.supervisor = {
-                    userType: createdByActor.userType, // Admin | Manager | Employee
-                    userId: createdByActor.userId,
-                    name: createdByActor.name,
-                    phone: createdByActor.phone,
+                    userType: supSnap.userType, // Admin | Manager | Employee
+                    userId: supSnap.userId,
+                    name: supSnap.name,
+                    phone: supSnap.phone,
                     assignedAt: now,
-                    assignedBy: createdByActor.userId, // schema: ObjectId
+                    assignedBy: (actorRef && actorRef.userId) || supSnap.userId, // schema: ObjectId
                 };
             }
             // eslint-disable-next-line no-await-in-loop
@@ -254,9 +294,9 @@ async function createPickupForClient({
     }
 
     // --- notify coordinators (fire-and-forget) ----------------------------
-    // Skipped when self-assigned — there is no triage step for a coordinator
-    // to action, so the "New Pickup Request" push would be misleading noise.
-    if (!selfAssign) try {
+    // Skipped when pre-assigned — there is no triage step for a coordinator to
+    // action, so the "New Pickup Request" push would be misleading noise.
+    if (!preAssigned) try {
         const [admins, managers] = await Promise.all([
             Admin.find({
                 canCoordinate: true,
@@ -286,6 +326,30 @@ async function createPickupForClient({
         );
     } catch (e) {
         console.error("Coordinator push notify failed:", e.message);
+    }
+
+    // When the pickup was auto-assigned to a specific supervisor (the recurring
+    // job's approved default supervisor), notify THEM — same as the manual
+    // accept flow does — so an auto-generated assignment isn't a surprise.
+    if (assignSupervisor && supSnap) try {
+        const Employee = require("../models/Employee");
+        const SupModel = { Admin, Manager, Employee }[supSnap.userType];
+        const supUser = SupModel
+            ? await SupModel.findById(supSnap.userId).select("pushSubscription").lean()
+            : null;
+        if (supUser && supUser.pushSubscription) {
+            const seg = supSnap.userType === "Admin" ? "/admin" : supSnap.userType === "Manager" ? "/manager" : "/employee";
+            const whenStr = pickup.scheduledDate ? new Date(pickup.scheduledDate).toLocaleDateString() : "an upcoming date";
+            await sendPush(supUser.pushSubscription, {
+                title: "New Pickup Assignment",
+                body: `${client.name} — recurring pickup ${pickup.pickupID} on ${whenStr}`,
+                icon: "/android-chrome-512x512.png",
+                tag: `pickup-assigned-${pickup._id}`,
+                data: { url: `${seg}/dashboard?tab=mypickups&id=${pickup._id}` },
+            });
+        }
+    } catch (e) {
+        console.error("Supervisor assign push failed:", e.message);
     }
 
     return pickup;

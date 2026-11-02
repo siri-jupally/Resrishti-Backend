@@ -10,10 +10,7 @@
 */
 
 const { calcImpact, calcGHG } = require("../utils/reportCalculations");
-const {
-    STREAM_TO_IMPACT_MATERIAL,
-    GHG_ORGANIC_STREAMS,
-} = require("../utils/reportFactors");
+const { GHG_ORGANIC_STREAMS } = require("../utils/reportFactors");
 
 /*
   The sample prints tonnage rounded to 2dp, so feeding its displayed figure
@@ -136,64 +133,73 @@ describe("calcGHG — grouping and edge cases", () => {
     });
 });
 
-describe("calcImpact", () => {
-    test("total counts every stream; savings only count mapped materials", () => {
+describe("calcImpact (per-stream configurable factors)", () => {
+    // Mirrors what wasteCategories.impactFactorConfig() hands in: per-stream
+    // { energy, oil, landfill, air, water, trees, co2 }. CO2 is the stream's
+    // co2e factor. 'hazardous' here has a co2 factor but NO env-savings factors.
+    const FACTORS = {
+        plastic: { energy: 5.774, oil: 2.593, landfill: 0.81, air: 2.5, water: 18.17, trees: 0, co2: 1.5 },
+        paper: { energy: 4.1, oil: 1.4384, landfill: 0.0891, air: 0.0272, water: 26.4978, trees: 0.017, co2: 0.94 },
+        ewaste: { energy: 4.123779, oil: 1.85324644, landfill: 0.260361, air: 0.50409844, water: 3.653987, trees: 0, co2: 1.44 },
+        hazardous: { co2: 1.6 },
+    };
+
+    test("total counts every stream; env savings only from streams with env factors", () => {
         const res = calcImpact([
-            {
-                lineItems: [
-                    { stream: "plastic", qtyKg: 10 },
-                    { stream: "hazardous", qtyKg: 57 }, // no impact factor
-                ],
-            },
-        ]);
-        // The sample document's headline is TOTAL WASTE RECYCLED — everything.
-        expect(res.totalWasteKg).toBe(67);
-        expect(res.unmappedKg).toBe(57);
-        // 10kg plastic x 5.774 kWh/kg
-        expect(res.energySaved).toBeCloseTo(57.74, 2);
-        expect(res.waterSaved).toBeCloseTo(181.7, 2);
+            { lineItems: [{ stream: "plastic", qtyKg: 10 }, { stream: "hazardous", qtyKg: 57 }] },
+        ], FACTORS);
+        expect(res.totalWasteKg).toBe(67);          // TOTAL WASTE RECYCLED — everything
+        expect(res.unmappedKg).toBe(57);            // hazardous has no env-savings factor
+        expect(res.energySaved).toBeCloseTo(57.74, 2);  // 10 × 5.774
+        expect(res.waterSaved).toBeCloseTo(181.7, 2);   // 10 × 18.17
     });
 
-    test("battery maps to E-waste, matching the CoD template's bucketing", () => {
-        expect(STREAM_TO_IMPACT_MATERIAL.battery).toBe("E-waste");
-        const viaBattery = calcImpact([{ lineItems: [{ stream: "battery", qtyKg: 10 }] }]);
-        const viaEwaste = calcImpact([{ lineItems: [{ stream: "ewaste", qtyKg: 10 }] }]);
-        expect(viaBattery.energySaved).toBeCloseTo(viaEwaste.energySaved, 4);
+    test("CO2 is a first-class impact metric, counted for EVERY stream with a co2 factor", () => {
+        const res = calcImpact([
+            { lineItems: [{ stream: "plastic", qtyKg: 10 }, { stream: "hazardous", qtyKg: 57 }] },
+        ], FACTORS);
+        // 10×1.5 + 57×1.6 — hazardous contributes CO2 even though it has no env factors
+        expect(res.co2Saved).toBeCloseTo(106.2, 2);
     });
 
-    test("all five indicator rows are always present, even at zero", () => {
-        const res = calcImpact([]);
-        expect(res.rows.map((r) => r.material)).toEqual([
-            "Plastic", "Paper", "Cardboard", "Metal", "E-waste",
-        ]);
-        expect(res.totalWasteKg).toBe(0);
+    test("a stream with no configured factors adds only mass (unmapped), zero savings", () => {
+        const res = calcImpact([{ lineItems: [{ stream: "other", qtyKg: 40 }] }], {});
+        expect(res.totalWasteKg).toBe(40);
+        expect(res.unmappedKg).toBe(40);
+        expect(res.energySaved).toBe(0);
+        expect(res.co2Saved).toBe(0);
     });
 
     test("quantities aggregate across multiple pickups", () => {
         const split = calcImpact([
             { lineItems: [{ stream: "paper", qtyKg: 100 }] },
             { lineItems: [{ stream: "paper", qtyKg: 200 }] },
-        ]);
-        const single = calcImpact([{ lineItems: [{ stream: "paper", qtyKg: 300 }] }]);
+        ], FACTORS);
+        const single = calcImpact([{ lineItems: [{ stream: "paper", qtyKg: 300 }] }], FACTORS);
         expect(split.energySaved).toBeCloseTo(single.energySaved, 4);
         expect(split.totalWasteKg).toBe(300);
     });
 
+    test("rows are per-stream, largest first", () => {
+        const res = calcImpact([
+            { lineItems: [{ stream: "plastic", qtyKg: 5 }, { stream: "paper", qtyKg: 50 }] },
+        ], FACTORS);
+        expect(res.rows.map((r) => r.stream)).toEqual(["paper", "plastic"]);
+    });
+
     test("negative and non-numeric quantities are ignored, not coerced", () => {
         const res = calcImpact([
-            {
-                lineItems: [
-                    { stream: "plastic", qtyKg: 10 },
-                    { stream: "plastic", qtyKg: -5 },
-                    { stream: "plastic", qtyKg: "abc" },
-                    { stream: "plastic" },
-                ],
-            },
-        ]);
+            { lineItems: [
+                { stream: "plastic", qtyKg: 10 },
+                { stream: "plastic", qtyKg: -5 },
+                { stream: "plastic", qtyKg: "abc" },
+                { stream: "plastic" },
+            ] },
+        ], FACTORS);
         expect(res.totalWasteKg).toBe(10);
     });
 
-    test("tolerates missing lineItems without throwing", () => {
+    test("tolerates missing lineItems and missing config without throwing", () => {
         expect(() => calcImpact([{}, { lineItems: null }])).not.toThrow();
         expect(calcImpact([{}]).totalWasteKg).toBe(0);
     });

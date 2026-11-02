@@ -47,8 +47,9 @@ const multer = require("multer");
 const mongoose = require("mongoose");
 const Pickup = require("../models/Pickup");
 // Live-tracking window + cap live on the model so the client controller and
-// this one agree on exactly when tracking is visible.
-const { TRACKING_ACTIVE_STATUSES, MAX_TRACKING_POINTS } = Pickup;
+// this one agree on exactly when tracking is visible. V2_FIELD_STATUSES is the
+// ordered list of the seven new pipeline stages.
+const { TRACKING_ACTIVE_STATUSES, MAX_TRACKING_POINTS, V2_FIELD_STATUSES } = Pickup;
 const Client = require("../models/Client");
 // Shared pickup-creation path, so a staff-created pickup is identical to a
 // client self-requested one (same validation, status, snapshots, notifications).
@@ -194,6 +195,14 @@ const PHOTO_REQUIRED_FOR = new Set([
 // for these, so the reason is the only record of what happened — hence required.
 const FIELD_TERMINAL = new Set(["failed", "no-show"]);
 
+// Statuses BEFORE the waste has been collected. Only a pickup still in one of
+// these can be "overdue" (missed): once collection has started the run should be
+// finished, never closed as overdue, so collected waste is never stranded.
+const PRE_COLLECTION = new Set([
+    "accepted", "scheduled", "en-route", "at-client",
+    "v2-departed", "v2-empty-weighed", "v2-at-client", "v2-loading",
+]);
+
 // User-facing notification copy per status (sent to the client's push
 // subscription if they have one). Quiet statuses are intentionally absent.
 const CLIENT_NOTIFICATION = {
@@ -217,6 +226,23 @@ const CLIENT_NOTIFICATION = {
         title: "Waste weighed",
         body: "Your waste has been weighed. Certificate coming soon.",
     },
+    // v2 client-meaningful stages (intermediate v2 stages stay quiet).
+    "v2-departed": {
+        title: "Pickup on the way",
+        body: "Your pickup team is on the way.",
+    },
+    "v2-at-client": {
+        title: "Pickup team arrived",
+        body: "Your pickup team has arrived at your location.",
+    },
+    "v2-loaded": {
+        title: "Waste collected",
+        body: "Your waste has been collected. It is on its way to our facility.",
+    },
+    "v2-at-facility": {
+        title: "Arrived at facility",
+        body: "Your waste has arrived at the Resrishti facility.",
+    },
     "failed": {
         title: "Pickup could not be completed",
         body: "We couldn't complete your pickup. Our team will be in touch.",
@@ -226,6 +252,33 @@ const CLIENT_NOTIFICATION = {
         body: "Our team couldn't collect your waste. Our team will be in touch.",
     },
 };
+
+// --- v2 (7-stage) state machine — used when pipelineVersion === 2 ---
+// Order: departed → empty-weighed → at-client → loading → loaded →
+// loaded-weighed → at-facility. Closure (→ 'closed') is a separate P2 endpoint.
+const ALLOWED_NEXT_V2 = {
+    "accepted": ["v2-departed", "postponed", "failed", "no-show"],
+    "scheduled": ["v2-departed", "postponed", "failed", "no-show"],
+    "postponed": ["scheduled"],
+    "v2-departed": ["v2-empty-weighed", "failed", "no-show"],
+    "v2-empty-weighed": ["v2-at-client", "failed", "no-show"],
+    "v2-at-client": ["v2-loading", "failed", "no-show"],
+    "v2-loading": ["v2-loaded", "failed", "no-show"],
+    // Once the vehicle is loaded the waste has been collected — like v1 after
+    // 'picked-up', the right correction is now weights/closure, NOT failed/
+    // no-show (which would drop already-collected, already-weighed waste from
+    // all reporting). So failed/no-show are not offered from here on.
+    "v2-loaded": ["v2-loaded-weighed"],
+    "v2-loaded-weighed": ["v2-at-facility"],
+    "v2-at-facility": [], // Closure handled by the P2 closure endpoint, not here.
+};
+
+// Every v2 field stage requires a photo. Stage 6 (v2-loaded-weighed) carries
+// the stream-wise weight entry AND a mandatory weighbridge photo.
+const PHOTO_REQUIRED_FOR_V2 = new Set(V2_FIELD_STATUSES);
+
+// The loaded-weighbridge stage is where preliminary stream weights are entered.
+const V2_LOADED_WEIGH = "v2-loaded-weighed";
 
 /**
  * Normalize the authenticated principal regardless of which auth middleware ran.
@@ -311,7 +364,7 @@ const listMyPickups = async (req, res) => {
 
         const [items, total] = await Promise.all([
             Pickup.find(filter)
-                .populate("client", "name contactName billingAddress")
+                .populate("client", "name contactName contactPhone billingAddress")
                 .sort({ scheduledDate: 1, createdAt: 1 })
                 .skip(offset)
                 .limit(limit),
@@ -366,8 +419,37 @@ const updatePickupStatus = async (req, res) => {
             return res.status(403).json({ message: "You are not the assigned supervisor for this pickup" });
         }
 
+        // State machine + photo rules depend on the pipeline version. Legacy
+        // (v1) pickups keep the 3-photo flow; v2 pickups run the 7-stage flow
+        // where every field stage requires a photo. Grandfathering = we branch
+        // here, never rewrite a pickup's version.
+        const legacy = Pickup.isLegacyPipeline(pickup);
+        const allowedMap = legacy ? ALLOWED_NEXT : ALLOWED_NEXT_V2;
+        const photoRequired = legacy ? PHOTO_REQUIRED_FOR : PHOTO_REQUIRED_FOR_V2;
+
+        // Overdue guard: a not-yet-collected pickup whose scheduled day has
+        // passed can no longer be collected — only closed with a reason (failed
+        // / no-show). Block every forward/progress transition (and postpone) so
+        // a stale assignment can't be "completed" days late and land in the
+        // wrong month's figures. Only applies pre-collection, so collected waste
+        // is never stranded; the close-with-reason path stays open.
+        if (
+            pickup.scheduledDate &&
+            PRE_COLLECTION.has(pickup.status) &&
+            !FIELD_TERMINAL.has(newStatus)
+        ) {
+            const startToday = new Date();
+            startToday.setHours(0, 0, 0, 0);
+            if (new Date(pickup.scheduledDate) < startToday) {
+                return res.status(409).json({
+                    message: "This pickup is overdue — its scheduled day has passed, so it can no longer be collected. Close it with a reason instead.",
+                    overdue: true,
+                });
+            }
+        }
+
         // State-machine guard.
-        const allowed = ALLOWED_NEXT[pickup.status] || [];
+        const allowed = allowedMap[pickup.status] || [];
         if (!allowed.includes(newStatus)) {
             return res.status(409).json({
                 message: `Invalid transition from ${pickup.status} to ${newStatus}`,
@@ -386,11 +468,45 @@ const updatePickupStatus = async (req, res) => {
         // Photo requirement — for the field-evidence statuses we need at least
         // one image. Accepts `photos[]` (current) or `photo` (older builds).
         const files = evidenceFilesFrom(req);
-        const needsPhoto = PHOTO_REQUIRED_FOR.has(newStatus);
+        const needsPhoto = photoRequired.has(newStatus);
         if (needsPhoto && files.length === 0) {
             return res.status(400).json({
                 message: `Photo evidence is required for status '${newStatus}'`,
             });
+        }
+
+        // v2 loaded-weighbridge stage captures PRELIMINARY stream-wise
+        // weights (the familiar per-stream entry). These are an estimate — the
+        // facility re-segregates and the final weights are confirmed at Closure.
+        let prelimLineItems = null;
+        if (!legacy && newStatus === V2_LOADED_WEIGH) {
+            let raw = req.body.lineItems;
+            if (typeof raw === "string") {
+                try { raw = JSON.parse(raw); }
+                catch { return res.status(400).json({ message: "lineItems must be a JSON-stringified array" }); }
+            }
+            if (!Array.isArray(raw) || raw.length === 0) {
+                return res.status(400).json({ message: "Enter at least one waste stream weight at the loaded-weighbridge stage." });
+            }
+            const validStreams = new Set(await require("../utils/wasteCategories").allStreamKeys());
+            const merged = new Map();
+            for (let i = 0; i < raw.length; i += 1) {
+                const item = raw[i] || {};
+                const stream = String(item.stream || "").trim();
+                const qtyKg = Number(item.qtyKg);
+                if (!stream || !validStreams.has(stream)) {
+                    return res.status(400).json({ message: `lineItems[${i}].stream must be one of: ${[...validStreams].join(", ")}` });
+                }
+                if (!Number.isFinite(qtyKg) || qtyKg <= 0) {
+                    return res.status(400).json({ message: `lineItems[${i}].qtyKg must be a positive number` });
+                }
+                if (merged.has(stream)) merged.get(stream).qtyKg += qtyKg;
+                else merged.set(stream, { stream, qtyKg, notes: item.notes ? String(item.notes) : undefined });
+            }
+            const items = [...merged.values()];
+            const total = Math.round(items.reduce((a, li) => a + li.qtyKg, 0) * 100) / 100;
+            if (total <= 0) return res.status(400).json({ message: "Total stream weight must be greater than zero." });
+            prelimLineItems = { items, total };
         }
 
         // Upload every image (postponed/scheduled may legitimately send none).
@@ -448,6 +564,25 @@ const updatePickupStatus = async (req, res) => {
         pickup.evidence = pickup.evidence || [];
         pickup.evidence.push(evidenceEntry);
         pickup.status = newStatus;
+        if (prelimLineItems) {
+            const now = new Date();
+            const actor = { userType: me.userType, userId: me.userId, name: me.name };
+            const prevTotal = pickup.totalKg || 0;
+            pickup.lineItems = prelimLineItems.items;
+            pickup.totalKg = prelimLineItems.total;
+            pickup.weightsStatus = "preliminary";
+            pickup.wasteDataEnteredAt = now;
+            pickup.wasteDataEnteredBy = actor;
+            pickup.wasteDataHistory = pickup.wasteDataHistory || [];
+            pickup.wasteDataHistory.push({
+                lineItems: prelimLineItems.items.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+                totalKg: prelimLineItems.total,
+                previousTotalKg: prevTotal,
+                reason: "Preliminary weights recorded in the field (loaded weighbridge)",
+                at: now,
+                by: actor,
+            });
+        }
         if (FIELD_TERMINAL.has(newStatus)) {
             pickup.failureReason = failureReason;
             evidenceEntry.notes = failureReason;
@@ -890,6 +1025,30 @@ const listClientsForPickup = async (req, res) => {
     }
 };
 
+// GET /api/{role}/my-pickups/clients/:id/sites
+// A client's active sites, so the create-on-behalf form can tag which location
+// the waste is coming from (parity with the client portal's own request form).
+// Pickup-agent gated, like the rest of the create-on-behalf flow.
+const listClientSitesForPickup = async (req, res) => {
+    try {
+        const me = getCurrentUser(req);
+        if (!me || !me.doc || me.doc.canSupervise !== true) {
+            return res.status(403).json({ message: "Pickup agent access required" });
+        }
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: "Invalid client id" });
+        }
+        const Site = require("../models/Site");
+        const sites = await Site.find({ client: req.params.id, isActive: true })
+            .select("name description address")
+            .sort({ name: 1 })
+            .lean();
+        return res.json({ items: sites, total: sites.length });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 // POST /api/{role}/my-pickups  { clientId, requestedDate, requestedStreams, clientNotes?, siteId? }
 const createPickupOnBehalf = async (req, res) => {
     try {
@@ -1089,16 +1248,167 @@ const stopTracking = async (req, res) => {
     }
 };
 
+// ==================== PICKUP CLOSURE (v2) ====================
+//
+// POST /api/{role}/my-pickups/:id/close   { lineItems?, isPartial?, partialReason? }
+//
+// Closes a v2 pickup at the facility: review/edit the final stream weights
+// (post-segregation) and confirm them, then mark the pickup `closed`.
+// Deliberately INDEPENDENT of certificates — no cert is created here (that is a
+// separate, explicit step). If lineItems is omitted the existing preliminary
+// weights are confirmed as-is.
+//
+// Authorization: the assigned supervisor, OR an admin, OR a coordinator
+// (canCoordinate) — the office that receives the waste.
+const closeRun = async (req, res) => {
+    try {
+        const me = getCurrentUser(req);
+        if (!me) return res.status(401).json({ message: "Not authorized" });
+
+        const pickup = await Pickup.findById(req.params.id);
+        if (!pickup) return res.status(404).json({ message: "Pickup not found" });
+
+        // Closure is a v2 concept; legacy pickups finish via waste-data.
+        if (Pickup.isLegacyPipeline(pickup)) {
+            return res.status(409).json({ message: "This pickup uses the legacy flow and is not closed this way." });
+        }
+
+        const isAdmin = me.userType === "Admin";
+        const isCoordinator = !!(me.doc && me.doc.canCoordinate);
+        const canSup = await assertCanSupervise(me);
+        const assignedId = pickup.supervisor && pickup.supervisor.userId;
+        const isOwner = canSup && assignedId && assignedId.toString() === me.userId.toString();
+        if (!isOwner && !isAdmin && !isCoordinator) {
+            return res.status(403).json({ message: "Only the assigned supervisor, a coordinator or an admin can close a pickup." });
+        }
+
+        if (pickup.status !== "v2-at-facility") {
+            return res.status(409).json({
+                message: `A pickup can only be closed once it has reached the facility (current: '${pickup.status}').`,
+                allowedFromStatus: ["v2-at-facility"],
+            });
+        }
+
+        // Final stream weights — edited at closure, or confirm the preliminary set.
+        let raw = req.body.lineItems;
+        if (typeof raw === "string") {
+            try { raw = JSON.parse(raw); }
+            catch { return res.status(400).json({ message: "lineItems must be a JSON-stringified array" }); }
+        }
+        if (!Array.isArray(raw) || raw.length === 0) {
+            raw = (pickup.lineItems || []).map((li) => ({ stream: li.stream, qtyKg: li.qtyKg }));
+        }
+        if (!Array.isArray(raw) || raw.length === 0) {
+            return res.status(400).json({ message: "No stream weights to confirm." });
+        }
+
+        const validStreams = new Set(await require("../utils/wasteCategories").allStreamKeys());
+        const merged = new Map();
+        for (let i = 0; i < raw.length; i += 1) {
+            const item = raw[i] || {};
+            const stream = String(item.stream || "").trim();
+            const qtyKg = Number(item.qtyKg);
+            if (!stream || !validStreams.has(stream)) {
+                return res.status(400).json({ message: `lineItems[${i}].stream must be one of: ${[...validStreams].join(", ")}` });
+            }
+            if (!Number.isFinite(qtyKg) || qtyKg <= 0) {
+                return res.status(400).json({ message: `lineItems[${i}].qtyKg must be a positive number` });
+            }
+            if (merged.has(stream)) merged.get(stream).qtyKg += qtyKg;
+            else merged.set(stream, { stream, qtyKg, notes: item.notes ? String(item.notes) : undefined });
+        }
+        const items = [...merged.values()];
+        const total = Math.round(items.reduce((a, li) => a + li.qtyKg, 0) * 100) / 100;
+        if (total <= 0) {
+            return res.status(400).json({ message: "Total waste cannot be zero. Cancel the pickup if nothing was collected." });
+        }
+
+        const now = new Date();
+        const actor = { userType: me.userType, userId: me.userId, name: me.name };
+        const prevTotal = pickup.totalKg || 0;
+
+        const isPartial = req.body.isPartial === true || String(req.body.isPartial) === "true";
+        const partialReason = String(req.body.partialReason || "").trim();
+        if (isPartial && !partialReason) {
+            return res.status(400).json({ message: "partialReason is required for a partial collection." });
+        }
+
+        // Atomic claim of the v2-at-facility → closed transition, so two
+        // simultaneous closes can't both write (which would duplicate the
+        // closure history + client push). The loser gets 409.
+        const claim = await Pickup.updateOne(
+            { _id: pickup._id, status: "v2-at-facility" },
+            { $set: { status: "closed" } }
+        );
+        if (!claim.modifiedCount) {
+            return res.status(409).json({ message: "This pickup was just closed." });
+        }
+
+        pickup.lineItems = items;
+        pickup.totalKg = total;
+        pickup.weightsStatus = "confirmed";
+        pickup.weightsConfirmedAt = now;
+        pickup.weightsConfirmedBy = actor;
+        pickup.wasteDataEnteredAt = pickup.wasteDataEnteredAt || now;
+        pickup.wasteDataEnteredBy = pickup.wasteDataEnteredBy || actor;
+        pickup.isPartial = isPartial;
+        pickup.partialReason = isPartial ? partialReason : undefined;
+        pickup.wasteDataHistory = pickup.wasteDataHistory || [];
+        pickup.wasteDataHistory.push({
+            lineItems: items.map((li) => ({ stream: li.stream, qtyKg: li.qtyKg })),
+            totalKg: total,
+            previousTotalKg: prevTotal,
+            reason: isPartial ? `Final weights confirmed at closure — partial: ${partialReason}` : "Final weights confirmed at closure",
+            at: now,
+            by: actor,
+        });
+        pickup.status = "closed";
+        pickup.evidence = pickup.evidence || [];
+        pickup.evidence.push({ status: "closed", at: now, by: actor, notes: "Pickup closed" });
+
+        // Live tracking goes dark on closure if it was still open.
+        if (pickup.tracking && pickup.tracking.mode && !pickup.tracking.endedAt) {
+            pickup.tracking.endedAt = now;
+        }
+
+        await pickup.save();
+
+        try {
+            getIo().to(`pickup_${pickup._id}`).emit("pickup:status-updated", { pickupId: pickup._id, status: "closed" });
+        } catch (e) { console.error("Socket emit error (close):", e.message || e); }
+
+        // Best-effort client push: the collection is complete.
+        try {
+            const client = await Client.findById(pickup.client).select("pushSubscription").lean();
+            if (client && client.pushSubscription) {
+                await notifyIfEnabled("pickup", client.pushSubscription, {
+                    title: "Pickup complete",
+                    body: `Your waste collection is complete — ${total} kg recorded.`,
+                    icon: "/android-chrome-512x512.png",
+                    data: { url: `/client/pickups/${pickup._id}` },
+                });
+            }
+        } catch (e) { console.error("Client push error (close):", e.message || e); }
+
+        return res.json(pickup);
+    } catch (err) {
+        console.error("closeRun error:", err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listMyPickups,
     listWasteCategories,
     updatePickupStatus,
     recordWasteData,
     listClientsForPickup,
+    listClientSitesForPickup,
     createPickupOnBehalf,
     setTracking,
     pingTracking,
     stopTracking,
+    closeRun,
     // Prefer `uploadEvidence` in routes — it turns multer failures into clear
     // 400s. `upload` stays exported for anything that wants the raw middleware.
     uploadEvidence,

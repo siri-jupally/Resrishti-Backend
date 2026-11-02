@@ -37,10 +37,12 @@ const Pickup = require("../models/Pickup");
 const Report = require("../models/Report");
 
 const { uploadFile, getS3Client } = require("../utils/s3");
-const { calcImpact, calcGHG } = require("../utils/reportCalculations");
+const { calcImpact, calcGHG, calcCod } = require("../utils/reportCalculations");
+const { impactFactorConfig, bucketForStream, refreshCache } = require("../utils/wasteCategories");
 const { generateReportNumber } = require("../utils/reportNumber");
 const { renderImpactReportPdf } = require("../utils/impactReportPdf");
 const { renderGhgReportPdf } = require("../utils/ghgReportPdf");
+const { renderMonthlyCodPdf } = require("../utils/monthlyCodPdf");
 const { sendEmail } = require("../utils/emailService");
 const { notifyIfEnabled } = require("../utils/push");
 
@@ -54,11 +56,12 @@ const MONTHS = [
     "July", "August", "September", "October", "November", "December",
 ];
 
-const REPORT_TYPES = ["impact", "ghg"];
+const REPORT_TYPES = ["impact", "ghg", "cod"];
 
 const TYPE_LABEL = {
     impact: "Environmental Impact Report",
     ghg: "Green House Gases Emission Report",
+    cod: "Certificate of Disposal",
 };
 
 /*
@@ -74,6 +77,8 @@ const ELIGIBLE_PICKUP_STATUSES = [
     "cert-draft",
     "cert-issued",
     "cert-sent",
+    // v2 pickups complete at Closure, which confirms the final stream weights.
+    "closed",
 ];
 
 // ---------- helpers ----------------------------------------------------
@@ -166,13 +171,27 @@ const findEligiblePickups = async (clientId, year, month) => {
 };
 
 /** Compute the type-specific snapshot from a set of pickups. */
-const buildSnapshot = (type, pickups) => {
+const buildSnapshot = async (type, pickups) => {
     if (type === "impact") {
-        const impactSnapshot = calcImpact(pickups);
+        // Per-stream factors come from the admin-configurable WasteCategory
+        // registry, so the report reflects whatever the operations team set.
+        const factorByStream = await impactFactorConfig();
+        const impactSnapshot = calcImpact(pickups, factorByStream);
         return {
             impactSnapshot,
             totalKgSnapshot: impactSnapshot.totalWasteKg,
             isEmpty: impactSnapshot.totalWasteKg <= 0,
+        };
+    }
+    if (type === "cod") {
+        // Monthly Certificate of Disposal — aggregate the month's disposed
+        // waste by certificate bucket (admin-configurable stream → bucket).
+        await refreshCache();
+        const codSnapshot = calcCod(pickups, bucketForStream);
+        return {
+            codSnapshot,
+            totalKgSnapshot: codSnapshot.totalKg,
+            isEmpty: codSnapshot.totalKg <= 0,
         };
     }
     const ghgSnapshot = calcGHG(pickups);
@@ -213,10 +232,11 @@ const presignFor = async (pdf) => {
     }
 };
 
-const renderFor = (report, client) =>
-    report.type === "impact"
-        ? renderImpactReportPdf(report, client)
-        : renderGhgReportPdf(report, client);
+const renderFor = (report, client) => {
+    if (report.type === "impact") return renderImpactReportPdf(report, client);
+    if (report.type === "cod") return renderMonthlyCodPdf(report, client);
+    return renderGhgReportPdf(report, client);
+};
 
 // No presigned S3 URL here — it would expose the bucket, region and access-key
 // ID in the mail body and stay live for its full expiry to anyone it's
@@ -274,7 +294,7 @@ const previewReport = async (req, res) => {
         if (!client) return res.status(404).json({ message: "Client not found" });
 
         const pickups = await findEligiblePickups(clientId, year, month);
-        const snap = buildSnapshot(type, pickups);
+        const snap = await buildSnapshot(type, pickups);
 
         // Is there already a report on file for this slot?
         const existing = await Report.findOne({
@@ -302,6 +322,7 @@ const previewReport = async (req, res) => {
             totalKg: snap.totalKgSnapshot,
             impactSnapshot: snap.impactSnapshot || null,
             ghgSnapshot: snap.ghgSnapshot || null,
+            codSnapshot: snap.codSnapshot || null,
             existing: existing
                 ? {
                       _id: existing._id,
@@ -338,7 +359,7 @@ const generateReport = async (req, res) => {
         if (!client) return res.status(404).json({ message: "Client not found" });
 
         const pickups = await findEligiblePickups(clientId, year, month);
-        const snap = buildSnapshot(type, pickups);
+        const snap = await buildSnapshot(type, pickups);
 
         if (snap.isEmpty) {
             return res.status(409).json({
@@ -378,6 +399,7 @@ const generateReport = async (req, res) => {
             totalKgSnapshot: snap.totalKgSnapshot,
             impactSnapshot: snap.impactSnapshot,
             ghgSnapshot: snap.ghgSnapshot,
+            codSnapshot: snap.codSnapshot,
             generatedAt: new Date(),
         };
 
@@ -504,8 +526,20 @@ const getReport = async (req, res) => {
             .lean();
         if (!report) return res.status(404).json({ message: "Report not found" });
 
+        // Full revision history: every revision shares the same reportNumber, so
+        // the whole chain (rev 1 → latest) comes back for an audit timeline —
+        // when each was generated / issued / sent and by whom, and which ones
+        // were superseded. Oldest revision first.
+        const history = await Report.find({
+            reportNumber: report.reportNumber,
+            client: report.client?._id || report.client,
+        })
+            .select("revision status generatedAt issuedAt issuedBy sentAt sentBy createdAt updatedAt")
+            .sort({ revision: 1 })
+            .lean();
+
         const previewUrl = await presignFor(report.pdf);
-        return res.json({ report, previewUrl });
+        return res.json({ report, previewUrl, history });
     } catch (err) {
         console.error("getReport error:", err.message);
         return res.status(500).json({ message: err.message });
@@ -704,9 +738,13 @@ const reviseReport = async (req, res) => {
 
         const oldReport = await Report.findById(id);
         if (!oldReport) return res.status(404).json({ message: "Report not found" });
-        if (oldReport.status !== "sent") {
+        // An issued report is still internal (the client portal only shows
+        // sent/superseded), so letting it be revised is safe and gives the
+        // coordinator a way to regenerate a period's figures after issuing but
+        // before sending. A draft is edited in place via generate (Refresh).
+        if (oldReport.status !== "sent" && oldReport.status !== "issued") {
             return res.status(409).json({
-                message: `Only sent reports can be revised (current: '${oldReport.status}')`,
+                message: `Only issued or sent reports can be revised (current: '${oldReport.status}')`,
             });
         }
 
@@ -717,7 +755,7 @@ const reviseReport = async (req, res) => {
             oldReport.periodYear,
             oldReport.periodMonth
         );
-        const snap = buildSnapshot(oldReport.type, pickups);
+        const snap = await buildSnapshot(oldReport.type, pickups);
 
         const newReport = await Report.create({
             reportNumber: oldReport.reportNumber, // number is stable across revisions
@@ -733,6 +771,7 @@ const reviseReport = async (req, res) => {
             totalKgSnapshot: snap.totalKgSnapshot,
             impactSnapshot: snap.impactSnapshot,
             ghgSnapshot: snap.ghgSnapshot,
+            codSnapshot: snap.codSnapshot,
             generatedAt: new Date(),
         });
 

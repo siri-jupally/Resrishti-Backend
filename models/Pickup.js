@@ -190,6 +190,20 @@ const pickupSchema = new mongoose.Schema(
         // with a 3-attempt retry loop on rare collisions.
         pickupID: { type: String, required: true, unique: true },
 
+        // --- Pickup pipeline revamp (additive migration, Phase 0) ---
+        // Which stage model this pickup follows:
+        //   1 = legacy flow (requested → … → cert-sent), the only flow before the
+        //       7-stage revamp. Existing rows are backfilled to 1; a MISSING value
+        //       is also treated as 1 (see isLegacyPipeline + migrations/0001).
+        //   2 = new 7-stage flow + explicit Closure (lands in Phase 1).
+        // The default is 1 on PURPOSE: a hydrated (non-lean) doc with no
+        // pipelineVersion field — i.e. every pickup created before this field
+        // existed — must read as legacy/v1 and stay on the old flow. (Mongoose
+        // applies the schema default on hydration, so a default of 2 would
+        // silently mis-route every existing pickup into the v2 state machine.)
+        // NEW pickups are set to 2 EXPLICITLY at creation (services/pickupCreation).
+        pipelineVersion: { type: Number, default: 1, enum: [1, 2], index: true },
+
         client: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Client",
@@ -221,6 +235,9 @@ const pickupSchema = new mongoose.Schema(
         requestedDate: { type: Date }, // when the client wants the pickup
         requestedStreams: [String],
         clientNotes: String,
+        // Set when this pickup was materialised from a recurring schedule
+        // (models/PickupSchedule) rather than requested one-off.
+        recurringScheduleId: { type: mongoose.Schema.Types.ObjectId, ref: "PickupSchedule", default: null, index: true },
 
         // Triage / lifecycle.
         status: {
@@ -249,6 +266,20 @@ const pickupSchema = new mongoose.Schema(
                 // Both are terminal and both carry failureReason.
                 "failed",
                 "no-show",
+
+                // --- v2 pipeline (7-stage revamp; only pipelineVersion:2) ---
+                // Each is a photo-gated stage; order is departed → empty-weighed
+                // → at-client → loading → loaded → loaded-weighed → at-facility,
+                // then the explicit Closure (P2) sets 'closed'. Added additively;
+                // legacy (v1) pickups never use these.
+                "v2-departed",        // 1 vehicle started towards client
+                "v2-empty-weighed",   // 2 empty vehicle photo
+                "v2-at-client",       // 3 empty vehicle at client location
+                "v2-loading",         // 4 loading started at client
+                "v2-loaded",          // 5 fully loaded vehicle at client
+                "v2-loaded-weighed",  // 6 stream-wise weights recorded (preliminary)
+                "v2-at-facility",     // 7 vehicle reached ReSrishti facility
+                "closed",             // Pickup Closed (Closure stage, P2)
             ],
         },
         rejectionReason: String,
@@ -305,6 +336,26 @@ const pickupSchema = new mongoose.Schema(
         // Audit of the weights: the first entry plus every later correction.
         wasteDataHistory: [wasteChangeSchema],
 
+        // Preliminary vs final confirmed weights (v2 pipeline).
+        //   'none'        — no stream weights yet.
+        //   'preliminary' — entered in the field at the loaded-weighbridge stage
+        //                   (an estimate; segregation may change it).
+        //   'confirmed'   — reviewed, corrected and confirmed at Closure (final;
+        //                   this is what certificates and impact use).
+        // v1 pickups leave this 'none' (their lineItems have always been final).
+        weightsStatus: {
+            type: String,
+            enum: ["none", "preliminary", "confirmed"],
+            default: "none",
+        },
+        weightsConfirmedAt: Date,
+        weightsConfirmedBy: {
+            userType: String,
+            userId: mongoose.Schema.Types.ObjectId,
+            name: String,
+            _id: false,
+        },
+
         // Cert — populated as it moves draft → issued → sent. The `Certificate`
         // model doesn't exist yet (Phase 1 step 8). Mongoose resolves refs
         // lazily on populate, so declaring this here is safe.
@@ -328,6 +379,15 @@ const pickupSchema = new mongoose.Schema(
 pickupSchema.index({ client: 1, status: 1 });
 pickupSchema.index({ status: 1, scheduledDate: 1 });
 pickupSchema.index({ "supervisor.userId": 1, status: 1 });
+// At most ONE pickup per (recurring schedule, occurrence date) — the DB-level
+// guarantee behind the generation job's idempotency, so overlapping runs
+// (create-on-create vs the daily job, resume races, multiple instances) can't
+// double-create. Partial so it never constrains one-off (non-recurring) pickups,
+// which all carry recurringScheduleId = null.
+pickupSchema.index(
+    { recurringScheduleId: 1, requestedDate: 1 },
+    { unique: true, partialFilterExpression: { recurringScheduleId: { $type: "objectId" } } }
+);
 
 const Pickup = mongoose.model("Pickup", pickupSchema);
 
@@ -352,11 +412,30 @@ const photosOf = (evidenceEntry) => {
 };
 
 /**
- * Statuses during which live tracking is shown to the client. Chosen window:
- * en-route through at-facility — it goes dark at 'weighed' and at any terminal
- * state. Mirrored on the frontend (lib/pickupStatus.js TRACKING_ACTIVE_STATUSES).
+ * The seven in-field v2 stages, in order (pipelineVersion:2). Shared by the
+ * state machine, photo-gating and tracking so they can't drift apart.
  */
-const TRACKING_ACTIVE_STATUSES = ["en-route", "at-client", "picked-up", "at-facility"];
+const V2_FIELD_STATUSES = [
+    "v2-departed", "v2-empty-weighed", "v2-at-client", "v2-loading",
+    "v2-loaded", "v2-loaded-weighed", "v2-at-facility",
+];
+
+/**
+ * Statuses during which live tracking is shown to the client. v1 window:
+ * en-route through at-facility; v2 window: every in-field stage. It goes dark
+ * once the pickup is weighed/closed or at any terminal state. Mirrored on the
+ * frontend (lib/pickupStatus.js TRACKING_ACTIVE_STATUSES).
+ */
+// Live tracking is active only while the vehicle is in transit or at the
+// client, and STOPS the moment it reaches the facility — the journey is over,
+// there's nothing left to track, and the agent is back at the company site.
+// So 'at-facility' (v1) and 'v2-at-facility' are deliberately excluded; once a
+// pickup hits either, isTrackingLive() returns false and updatePickupStatus
+// stamps tracking.endedAt, so the client card disappears and agent pings stop.
+const TRACKING_ACTIVE_STATUSES = [
+    "en-route", "at-client", "picked-up",
+    ...V2_FIELD_STATUSES.filter((s) => s !== "v2-at-facility"),
+];
 
 // Most GPS points we keep per pickup. At one point every ~10-15s a long pickup
 // stays well under this; the cap just bounds a stuck-sharing session.
@@ -377,8 +456,43 @@ const isTrackingLive = (pickup) => {
     return TRACKING_ACTIVE_STATUSES.includes(pickup.status);
 };
 
+// --- Pickup pipeline revamp helpers (Phase 0) ---
+
+/**
+ * A pickup created before the 7-stage revamp (or any row whose version is unset)
+ * follows the legacy flow and is grandfathered — it is never forced into the new
+ * pipeline. Branch on this wherever v1 and v2 behave differently.
+ * @param {Object} pickup - Pickup doc or lean object
+ * @returns {boolean} true for legacy (v1 / missing), false for v2
+ */
+const isLegacyPipeline = (pickup) => !pickup || (pickup.pipelineVersion ?? 1) !== 2;
+
+/**
+ * Statuses that mean "the collection is effectively complete — waste has been
+ * recorded." This is the SINGLE SOURCE OF TRUTH for what counts as a closed /
+ * completed pickup across reports, dashboards and public impact, and is NOT
+ * gated on certificate issuance. It stays equal to
+ * reportController.ELIGIBLE_PICKUP_STATUSES (a drift-guard test enforces this).
+ *
+ * v1 completes at `processed` (and the cert-* stages that follow); v2 completes
+ * at `closed` (Closure confirms the final weights). As of P3 the client
+ * dashboard and public-stats job both count this set — impact reflects every
+ * completed pickup, whether or not a certificate was ever issued.
+ */
+const CLOSED_EQUIVALENT_STATUSES = ["processed", "cert-draft", "cert-issued", "cert-sent", "closed"];
+
+/** True when a pickup is complete enough to count toward impact / reports. */
+const isClosedEquivalent = (statusOrPickup) => {
+    const status = typeof statusOrPickup === "string" ? statusOrPickup : statusOrPickup?.status;
+    return CLOSED_EQUIVALENT_STATUSES.includes(status);
+};
+
 module.exports = Pickup;
 module.exports.photosOf = photosOf;
 module.exports.TRACKING_ACTIVE_STATUSES = TRACKING_ACTIVE_STATUSES;
+module.exports.V2_FIELD_STATUSES = V2_FIELD_STATUSES;
 module.exports.MAX_TRACKING_POINTS = MAX_TRACKING_POINTS;
 module.exports.isTrackingLive = isTrackingLive;
+module.exports.isLegacyPipeline = isLegacyPipeline;
+module.exports.CLOSED_EQUIVALENT_STATUSES = CLOSED_EQUIVALENT_STATUSES;
+module.exports.isClosedEquivalent = isClosedEquivalent;

@@ -7,10 +7,11 @@
     `StatsSnapshot` document keyed by `'public-live-stats'`.
 
   Eligibility:
-  - Only pickups whose certs have been issued or sent count toward the public
-    total ("cert-issued" / "cert-sent"). Pickups still in the pipeline are
-    excluded because the data isn't legally finalized yet — surfacing them
-    publicly would create off-by-N drift when a draft is corrected.
+  - Every COMPLETED pickup counts toward the public total, whether or not a
+    certificate was ever issued (P3 — impact decoupled from cert issuance). The
+    set is Pickup.CLOSED_EQUIVALENT_STATUSES (processed + cert stages for v1,
+    "closed" for v2), the same set the monthly Impact report uses. Pickups still
+    in the pipeline are excluded because their weights aren't finalized yet.
 
   Privacy (clientmngmt.md §12.3):
   - The snapshot only contains aggregate numbers + a per-stream kg breakdown.
@@ -35,11 +36,12 @@ const { co2eForLineItems } = require("../utils/emissionFactors");
  * "Recompute Now" button, tests, scripts). Idempotent.
  */
 const computePublicStats = async () => {
-    // Only pickups whose certs have been issued or sent count toward public
-    // stats. Drafts and in-flight pickups are excluded — the legal record
-    // isn't final yet, so surfacing them publicly would create drift.
+    // Every completed pickup counts toward public stats (P3 — impact decoupled
+    // from cert issuance). Still-in-flight pickups are excluded because their
+    // weights aren't finalized yet. Shared set keeps this in lock-step with the
+    // monthly Impact report and the client dashboard.
     const eligiblePickups = await Pickup.find({
-        status: { $in: ["cert-issued", "cert-sent"] },
+        status: { $in: Pickup.CLOSED_EQUIVALENT_STATUSES },
     })
         .select("lineItems")
         .lean();

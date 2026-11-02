@@ -131,11 +131,12 @@ const getDashboard = async (req, res) => {
   try {
     const clientId = req.client._id;
 
-    // Pickups whose certs are issued or sent → these are the "diverted" totals
-    // that the client portal mirrors from the public stats methodology.
+    // Every COMPLETED pickup counts toward the "diverted" totals, regardless of
+    // whether a certificate was ever issued (P3 — impact decoupled from cert
+    // issuance). Mirrors the monthly Impact report + public-stats methodology.
     const eligiblePickups = await Pickup.find({
       client: clientId,
-      status: { $in: ["cert-issued", "cert-sent"] },
+      status: { $in: Pickup.CLOSED_EQUIVALENT_STATUSES },
     })
       .select("lineItems")
       .lean();
@@ -162,10 +163,29 @@ const getDashboard = async (req, res) => {
 
     // Only `sent` certs are visible to the client — issued-but-not-yet-sent
     // are still being reviewed by the manager and shouldn't show up here.
-    const certsReceived = await Certificate.countDocuments({
+    // "Certificates received" = every Certificate of Disposal the client can
+    // see, to match the Certificates tab: the monthly CoD reports (the primary
+    // document clients want) PLUS the occasional per-pickup certificate. Same
+    // visibility rule as those lists — sent, or a previously-sent revision now
+    // superseded.
+    const visibleSent = { $or: [{ status: "sent" }, { status: "superseded", sentAt: { $ne: null } }] };
+    // Count DISTINCT documents, not rows: revisions share a certNumber /
+    // reportNumber, and a revised-and-resent doc has several visible revisions.
+    // Counting rows made one revised CoD read as two "received" certificates —
+    // matching the Certificates tab, which shows one card per number.
+    const [perPickupCertNos, codReportNos] = await Promise.all([
+      Certificate.distinct("certNumber", { client: clientId, ...visibleSent }),
+      Report.distinct("reportNumber", { client: clientId, type: "cod", ...visibleSent }),
+    ]);
+    const certsReceived = perPickupCertNos.length + codReportNos.length;
+
+    // "Reports received" = the analytical reports only (Impact + GHG); the
+    // monthly CoD is counted under certificates above, matching the Reports tab.
+    const reportsReceived = (await Report.distinct("reportNumber", {
       client: clientId,
-      status: "sent",
-    });
+      type: { $in: ["impact", "ghg"] },
+      ...visibleSent,
+    })).length;
 
     // "Last contact" signal — any pickup, any status. Helps the client see
     // we're working even if the cert isn't out yet.
@@ -188,6 +208,7 @@ const getDashboard = async (req, res) => {
     return res.json({
       totalKgDiverted: Math.round(totalKgDiverted * 100) / 100,
       certsReceived,
+      reportsReceived,
       lastPickupAt: lastPickup?.createdAt || null,
       co2eAvoided: Math.round(co2eAvoided * 100) / 100,
       upcomingPickups,
@@ -234,12 +255,19 @@ const listMyCertificates = async (req, res) => {
 
     const filter = { client: clientId, status: statusFilter };
 
-    // A certificate cancelled before it ever left the building is not the
-    // client's business — they never held it. One cancelled after it was sent
-    // is, because they need to know the copy they have is void.
+    // A document the client never received is not their business. A plain
+    // 'sent' cert is always visible; a 'cancelled' or 'superseded' one only if
+    // it was actually sent at some point (sentAt set):
+    //   - cancelled-but-sent: they need to know the copy they hold is void.
+    //   - superseded-but-sent: it is a previously-delivered revision, kept as
+    //     proof/history. A cert revised straight from 'issued' (never sent) is
+    //     superseded WITHOUT a sentAt, so it must NOT surface here — otherwise a
+    //     correction the client never saw would appear as if it had been issued
+    //     to them.
     filter.$or = [
-      { status: { $ne: "cancelled" } },
+      { status: { $nin: ["cancelled", "superseded"] } },
       { status: "cancelled", sentAt: { $ne: null } },
+      { status: "superseded", sentAt: { $ne: null } },
     ];
 
     // Count + page in parallel to keep latency low on big histories.
@@ -280,6 +308,9 @@ const downloadMyCertificate = async (req, res) => {
   try {
     const clientId = req.client._id;
     const certId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(certId)) {
+      return res.status(404).json({ message: "Certificate not found" });
+    }
 
     const cert = await Certificate.findOne({
       _id: certId,
@@ -297,6 +328,13 @@ const downloadMyCertificate = async (req, res) => {
     // that listed issued certs) could pull the PDF before it was ever sent.
     // Same 404 as above so the endpoint never confirms the cert exists.
     if (!CLIENT_DOWNLOADABLE_CERT_STATUSES.includes(cert.status)) {
+      return res.status(404).json({ message: "Certificate not found" });
+    }
+
+    // A superseded cert is downloadable only if it was actually sent — a
+    // revision made straight from 'issued' is superseded with no sentAt and
+    // was never the client's to hold. Same 404 so the endpoint stays silent.
+    if (cert.status === "superseded" && !cert.sentAt) {
       return res.status(404).json({ message: "Certificate not found" });
     }
 
@@ -351,7 +389,15 @@ const listMyReports = async (req, res) => {
     }
 
     const filter = { client: clientId, status: statusFilter };
-    if (["impact", "ghg"].includes(req.query.type)) filter.type = req.query.type;
+    // A 'superseded' report is only the client's to see if it was actually
+    // sent. Revising an issued-but-never-sent report supersedes it without a
+    // sentAt, and that copy must stay internal. A plain 'sent' report is
+    // always visible; a previously-sent-then-superseded one stays as history.
+    filter.$or = [
+      { status: "sent" },
+      { status: "superseded", sentAt: { $ne: null } },
+    ];
+    if (["impact", "ghg", "cod"].includes(req.query.type)) filter.type = req.query.type;
     const year = parseInt(req.query.year, 10);
     if (Number.isInteger(year)) filter.periodYear = year;
 
@@ -403,6 +449,13 @@ const downloadMyReport = async (req, res) => {
       return res.status(404).json({ message: "Report not found" });
     }
 
+    // Superseded is downloadable only if it was actually sent — a report
+    // revised straight from 'issued' is superseded with no sentAt and was
+    // never released to the client.
+    if (report.status === "superseded" && !report.sentAt) {
+      return res.status(404).json({ message: "Report not found" });
+    }
+
     if (!report.pdf || !report.pdf.key) {
       return res.status(404).json({ message: "Report PDF not available" });
     }
@@ -432,7 +485,7 @@ const downloadMyReport = async (req, res) => {
 const listMySites = async (req, res) => {
   try {
     const sites = await Site.find({ client: req.client._id, isActive: true })
-      .select("name description address")
+      .select("name description address contactName contactPhone")
       .sort({ name: 1 })
       .lean();
     return res.json({ items: sites, total: sites.length });
@@ -463,6 +516,188 @@ const listWasteCategories = async (req, res) => {
   }
 };
 
+// PATCH /api/client/profile
+//
+// The client edits their own contact + billing details. contactEmail is the
+// login identity (unique) and is intentionally NOT editable here; status,
+// account manager, tags and the auth fields are off-limits too — only the
+// whitelisted fields below are ever touched.
+const CLIENT_INDUSTRIES = [
+  "Hospital", "FMCG", "IT", "Industrial", "Hospitality",
+  "Education", "Government", "Retail", "Other",
+];
+const updateMyProfile = async (req, res) => {
+  try {
+    const client = req.client; // full, savable mongoose doc (see authClient)
+    const b = req.body || {};
+
+    if (b.name !== undefined) {
+      const v = String(b.name).trim();
+      if (!v) return res.status(400).json({ message: "Organisation name can't be empty" });
+      client.name = v;
+    }
+    if (b.contactName !== undefined) {
+      const v = String(b.contactName).trim();
+      if (!v) return res.status(400).json({ message: "Contact name can't be empty" });
+      client.contactName = v;
+    }
+    if (b.contactPhone !== undefined) {
+      const v = String(b.contactPhone).trim();
+      if (!v) return res.status(400).json({ message: "Contact phone can't be empty" });
+      client.contactPhone = v;
+    }
+    if (b.gstin !== undefined) client.gstin = String(b.gstin).trim();
+    if (b.industry !== undefined) {
+      const v = String(b.industry).trim();
+      if (v && !CLIENT_INDUSTRIES.includes(v)) {
+        return res.status(400).json({ message: "Invalid industry" });
+      }
+      client.industry = v || undefined;
+    }
+    if (b.billingAddress && typeof b.billingAddress === "object") {
+      const cur = client.billingAddress
+        ? (client.billingAddress.toObject ? client.billingAddress.toObject() : { ...client.billingAddress })
+        : {};
+      for (const k of ["line1", "line2", "city", "state", "postalCode", "country"]) {
+        if (b.billingAddress[k] !== undefined) cur[k] = String(b.billingAddress[k]).trim();
+      }
+      client.billingAddress = cur;
+      client.markModified("billingAddress");
+    }
+
+    await client.save();
+    // Re-read so the response matches getMe exactly (passwordHash stays excluded
+    // by the schema's select:false).
+    const fresh = await Client.findById(client._id);
+    return res.json(fresh);
+  } catch (err) {
+    console.error("updateMyProfile error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// POST /api/client/subscribe
+//
+// Saves the browser's Web Push subscription onto the client so they actually
+// receive the push notifications the app already tries to send everywhere via
+// safePush(client.pushSubscription, …). Same shape as the admin/manager/employee
+// subscribe endpoints.
+const subscribeClient = async (req, res) => {
+  try {
+    const sub = req.body;
+    if (!sub || !sub.endpoint) {
+      return res.status(400).json({ message: "A valid push subscription is required" });
+    }
+    await Client.updateOne({ _id: req.client._id }, { $set: { pushSubscription: sub } });
+    return res.json({ message: "Notifications enabled" });
+  } catch (err) {
+    console.error("subscribeClient error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ---- Client-managed collection sites -------------------------------------
+// A client maintains their own buildings/locations (the Site registry) from the
+// portal. Every query is scoped to req.client._id, so a client can only ever
+// see or touch their own sites. `client` is never reassignable — moving a site
+// between clients would retroactively move tonnage between issued reports.
+const SITE_ADDRESS_KEYS = ["line1", "line2", "city", "state", "postalCode", "country"];
+const cleanSiteAddress = (addr) => {
+  if (!addr || typeof addr !== "object") return undefined;
+  const out = {};
+  for (const k of SITE_ADDRESS_KEYS) {
+    if (addr[k] !== undefined) out[k] = String(addr[k]).trim();
+  }
+  return out;
+};
+
+// POST /api/client/sites
+const createMySite = async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = String(b.name || "").trim();
+    if (!name) return res.status(400).json({ message: "Site name is required" });
+    const site = await Site.create({
+      client: req.client._id,
+      name,
+      description: b.description !== undefined ? String(b.description).trim() : undefined,
+      address: cleanSiteAddress(b.address),
+      contactName: b.contactName !== undefined ? String(b.contactName).trim() : undefined,
+      contactPhone: b.contactPhone !== undefined ? String(b.contactPhone).trim() : undefined,
+    });
+    return res.status(201).json({ site });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: "You already have a site with that name" });
+    }
+    console.error("createMySite error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// PATCH /api/client/sites/:id
+const updateMySite = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: "Invalid site id" });
+    }
+    const site = await Site.findOne({ _id: req.params.id, client: req.client._id });
+    if (!site) return res.status(404).json({ message: "Site not found" });
+
+    const b = req.body || {};
+    if (b.name !== undefined) {
+      const v = String(b.name).trim();
+      if (!v) return res.status(400).json({ message: "Site name can't be empty" });
+      site.name = v;
+    }
+    if (b.description !== undefined) site.description = String(b.description).trim();
+    if (b.contactName !== undefined) site.contactName = String(b.contactName).trim();
+    if (b.contactPhone !== undefined) site.contactPhone = String(b.contactPhone).trim();
+    if (b.address && typeof b.address === "object") {
+      const cur = site.address
+        ? (site.address.toObject ? site.address.toObject() : { ...site.address })
+        : {};
+      for (const k of SITE_ADDRESS_KEYS) {
+        if (b.address[k] !== undefined) cur[k] = String(b.address[k]).trim();
+      }
+      site.address = cur;
+      site.markModified("address");
+    }
+    await site.save();
+    return res.json({ site });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: "You already have a site with that name" });
+    }
+    console.error("updateMySite error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// DELETE /api/client/sites/:id — hard-delete when nothing references it, else
+// soft-retire (isActive:false) so issued reports / past pickups stay reproducible.
+const removeMySite = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: "Invalid site id" });
+    }
+    const site = await Site.findOne({ _id: req.params.id, client: req.client._id });
+    if (!site) return res.status(404).json({ message: "Site not found" });
+
+    const pickupCount = await Pickup.countDocuments({ site: site._id });
+    if (pickupCount > 0) {
+      site.isActive = false;
+      await site.save();
+      return res.json({ retired: true, message: "Site retired (past pickups reference it)." });
+    }
+    await site.deleteOne();
+    return res.json({ deleted: true, _id: String(site._id) });
+  } catch (err) {
+    console.error("removeMySite error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   loginClient,
   listWasteCategories,
@@ -473,4 +708,9 @@ module.exports = {
   downloadMyReport,
   listMySites,
   downloadMyCertificate,
+  updateMyProfile,
+  subscribeClient,
+  createMySite,
+  updateMySite,
+  removeMySite,
 };

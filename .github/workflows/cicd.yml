@@ -23,7 +23,10 @@ jobs:
     runs-on: self-hosted 
     steps:
       - name: Clean up docker space
-        run: docker system prune -f
+        # `|| true` so an intermittent "a prune operation is already running"
+        # (housekeeping) can never abort the job before pull/rm/run — that would
+        # silently leave prod on the old image.
+        run: docker system prune -f || true
       - name: Pull image from docker hub
         run: docker pull  sirijupally/nodejs-app:latest 
       - name: Delete old container

@@ -1,0 +1,55 @@
+{
+  "capturedAt": "2026-11-01T07:22:47.681Z",
+  "db": "mongodb+srv://***@cluster0.sntno3m.mongodb.net/?appName=Cluster0",
+  "pickups": {
+    "total": 240,
+    "byStatus": {
+      "accepted": 15,
+      "picked-up": 1,
+      "weighed": 3,
+      "at-client": 7,
+      "cert-sent": 2,
+      "cert-draft": 187,
+      "postponed": 1,
+      "at-facility": 6,
+      "cert-issued": 18
+    },
+    "byPipelineVersion": {
+      "1": 240
+    }
+  },
+  "closedEquivalent": {
+    "count": 207,
+    "totalKg": 587805.5
+  },
+  "certGatedToday": {
+    "count": 20,
+    "totalKg": 56030.6
+  },
+  "certificates": {
+    "total": 207,
+    "byStatus": {
+      "sent": 2,
+      "draft": 187,
+      "issued": 18
+    }
+  },
+  "reports": {
+    "total": 6,
+    "byType": {
+      "impact": 6
+    },
+    "byStatus": {
+      "issued": 3,
+      "sent": 2,
+      "draft": 1
+    }
+  },
+  "p3ExpectedImpactJump": {
+    "note": "After P3, dashboard/public impact moves from certGatedToday -> closedEquivalent.",
+    "fromCount": 20,
+    "toCount": 207,
+    "fromKg": 56030.6,
+    "toKg": 587805.5
+  }
+}

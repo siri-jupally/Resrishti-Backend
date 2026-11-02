@@ -31,8 +31,28 @@ const Employee = require("../models/Employee");
 const Client = require("../models/Client");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { sendEmail } = require("../utils/emailService");
+const { getIo } = require("../socketHandler");
 
 // ---------- helpers ----------------------------------------------------
+
+/**
+ * Push a pickup status change to anyone watching its room (the client portal
+ * and the admin detail view join `pickup_<id>` via socket). Best-effort — a
+ * socket failure must never break the state transition that already saved.
+ */
+const emitPickupStatus = (pickup, extra = {}) => {
+    try {
+        getIo()
+            .to(`pickup_${pickup._id}`)
+            .emit("pickup:status-updated", {
+                pickupId: pickup._id,
+                status: pickup.status,
+                ...extra,
+            });
+    } catch (socketErr) {
+        console.error("Socket emit error (pickup):", socketErr.message || socketErr);
+    }
+};
 
 /**
  * Final authorization gate per handler. protectTriage already pre-screens,
@@ -258,7 +278,7 @@ const listPickups = async (req, res) => {
     const Pickup = require("../models/Pickup");
 
     try {
-        const { status, supervisor, client, from, to } = req.query;
+        const { status, supervisor, client, from, to, search, stream } = req.query;
         const limit = Math.min(Number(req.query.limit) || 50, 200);
         const offset = Number(req.query.offset) || 0;
 
@@ -275,6 +295,26 @@ const listPickups = async (req, res) => {
         }
         if (client && mongoose.Types.ObjectId.isValid(client)) {
             filter.client = client;
+        }
+        // Free-text search over the human-friendly pickup ID + client name
+        // snapshot (case-insensitive). The input is regex-escaped so a client
+        // name with special characters can't break the query.
+        if (search && String(search).trim()) {
+            const safe = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const rx = new RegExp(safe, "i");
+            filter.$or = [{ pickupID: rx }, { clientNameSnapshot: rx }];
+        }
+        // Waste-stream filter: pickups that requested (or were collected with)
+        // the given stream. Combine safely with the search $or via $and.
+        if (stream && String(stream).trim()) {
+            const s = String(stream).trim();
+            const streamCond = { $or: [{ requestedStreams: s }, { "lineItems.stream": s }] };
+            if (filter.$or) {
+                filter.$and = [{ $or: filter.$or }, streamCond];
+                delete filter.$or;
+            } else {
+                Object.assign(filter, streamCond);
+            }
         }
         if (from || to) {
             filter.requestedDate = {};
@@ -518,6 +558,7 @@ const acceptPickup = async (req, res) => {
             await safeEmail(pickup.client.contactEmail, subject, text, html);
         }
 
+        emitPickupStatus(pickup, { scheduledDate: pickup.scheduledDate });
         return res.json(pickup);
     } catch (err) {
         console.error("acceptPickup error:", err);
@@ -621,6 +662,7 @@ const rejectPickup = async (req, res) => {
             await safeEmail(pickup.client.contactEmail, subject, text, html);
         }
 
+        emitPickupStatus(pickup, { rejectionReason: pickup.rejectionReason });
         return res.json(pickup);
     } catch (err) {
         console.error("rejectPickup error:", err);
@@ -820,9 +862,14 @@ const reassignSupervisor = async (req, res) => {
 /**
  * PATCH /api/admin/pickups/:id/cancel
  *
- * Triage-side cancellation (admin/coordinator-initiated). Refused if the
- * pickup has already reached terminal states (cert-sent, cancelled,
- * rejected) — those should stay immutable for the audit trail.
+ * Triage-side cancellation (admin/coordinator-initiated). Cancel only applies
+ * BEFORE the waste is collected. It is refused once the pickup is:
+ *   - completed (processed/cert-draft/cert-issued/cert-sent/closed) — the waste
+ *     was physically collected and weighed, so "cancel" is a contradiction and
+ *     would orphan the recorded weights (they'd linger on the doc but drop out
+ *     of the monthly CoD, which filters on status). Fix a mistaken record with a
+ *     void/delete, or a document problem with a certificate cancel/revise.
+ *   - already final (cancelled/rejected) — immutable for the audit trail.
  */
 const cancelPickup = async (req, res) => {
     if (!canTriage(req)) {
@@ -834,15 +881,13 @@ const cancelPickup = async (req, res) => {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
             return res.status(400).json({ message: "Invalid pickup id" });
         }
-        const { cancelledReason } = req.body || {};
+        const { cancelledReason, cancelSeries } = req.body || {};
         const reason = String(cancelledReason || "").trim();
         if (!reason) {
             return res
                 .status(400)
                 .json({ message: "cancelledReason is required" });
         }
-
-        const terminal = ["cert-sent", "cancelled", "rejected"];
 
         const pickup = await Pickup.findById(req.params.id).populate(
             "client",
@@ -851,7 +896,16 @@ const cancelPickup = async (req, res) => {
         if (!pickup) {
             return res.status(404).json({ message: "Pickup not found" });
         }
-        if (terminal.includes(pickup.status)) {
+        // A completed collection can't be cancelled — the waste was physically
+        // collected and weighed. Cancelling would orphan those weights (they stay
+        // on the doc but drop out of the monthly CoD's status-filtered total).
+        if (Pickup.CLOSED_EQUIVALENT_STATUSES.includes(pickup.status)) {
+            return res.status(409).json({
+                message:
+                    "This pickup is already completed — the waste was collected and weighed, so it can't be cancelled. To fix a mistaken record delete it; to fix its certificate, cancel or revise the certificate instead.",
+            });
+        }
+        if (["cancelled", "rejected"].includes(pickup.status)) {
             return res.status(409).json({
                 message: `Pickup is already in terminal status '${pickup.status}'`,
             });
@@ -943,7 +997,30 @@ const cancelPickup = async (req, res) => {
             }
         }
 
-        return res.json(pickup);
+        // ---- optionally stop the whole recurring series ----
+        // When the admin chose "cancel the series", also cancel the schedule and
+        // its other not-yet-started pickups (this one is already cancelled above,
+        // so the helper skips it).
+        let series = null;
+        const wantSeries = cancelSeries === true || cancelSeries === "true";
+        if (wantSeries && pickup.recurringScheduleId) {
+            const PickupSchedule = require("../models/PickupSchedule");
+            const { cancelFuturePickupsForSchedule } = require("../services/recurringPickupJob");
+            const schedule = await PickupSchedule.findById(pickup.recurringScheduleId);
+            if (schedule && !["cancelled", "completed"].includes(schedule.status)) {
+                schedule.status = "cancelled";
+                schedule.nextOccurrence = null;
+                await schedule.save();
+            }
+            const cancelledPickups = await cancelFuturePickupsForSchedule(pickup.recurringScheduleId, {
+                reason: `Recurring series cancelled: ${reason}`,
+                actor,
+            });
+            series = { scheduleCancelled: true, cancelledPickups };
+        }
+
+        emitPickupStatus(pickup, { cancelledReason: pickup.cancelledReason });
+        return res.json(series ? { ...pickup.toObject(), series } : pickup);
     } catch (err) {
         console.error("cancelPickup error:", err);
         return res.status(500).json({ message: err.message });
@@ -1021,6 +1098,10 @@ const reschedulePickup = async (req, res) => {
         const when = new Date(scheduledDate);
         if (!scheduledDate || Number.isNaN(when.getTime())) {
             return res.status(400).json({ message: "A valid scheduledDate is required" });
+        }
+        // A pickup can't be rescheduled into the past — same guard as accept.
+        if (when.getTime() < Date.now()) {
+            return res.status(400).json({ message: "scheduledDate cannot be in the past" });
         }
         const why = String(reason || "").trim();
         if (!why) {
@@ -1133,6 +1214,7 @@ const reschedulePickup = async (req, res) => {
             }
         }
 
+        emitPickupStatus(pickup, { scheduledDate: pickup.scheduledDate });
         return res.json(pickup);
     } catch (err) {
         console.error("reschedulePickup error:", err);
@@ -1457,4 +1539,8 @@ module.exports = {
     reassignSupervisor,
     cancelPickup,
     getSupervisorPool,
+    // Reused by the recurring-schedule approval controller.
+    resolveSupervisor,
+    buildSupervisorSnapshot,
+    actorFromReq,
 };

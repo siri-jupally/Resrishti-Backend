@@ -65,12 +65,15 @@ const makeClient = (fields = {}) => {
     });
 };
 
-const makePickup = (client) =>
+// Defaults to a FINISHED pickup ("closed") — that is "history" the client is
+// archived around. Pass an active status (e.g. "scheduled") to exercise the
+// active-pickup delete guard.
+const makePickup = (client, status = "closed") =>
     Pickup.create({
         pickupID: `PU-DEL-${Math.random().toString(16).slice(2, 8).toUpperCase()}`,
         client: client._id,
         clientNameSnapshot: client.name,
-        status: "scheduled",
+        status,
     });
 
 beforeEach(async () => {
@@ -128,9 +131,9 @@ describe("deleting a client with nothing on record", () => {
 // ──────────────────── a client with history ────────────────────
 
 describe("deleting a client that has history", () => {
-    test("a client with a pickup is archived, not removed", async () => {
+    test("a client with a (finished) pickup is archived, not removed", async () => {
         const client = await makeClient();
-        await makePickup(client);
+        await makePickup(client); // closed → history, not in-flight
 
         const res = await del(client);
 
@@ -139,6 +142,19 @@ describe("deleting a client that has history", () => {
         const after = await Client.findById(client._id);
         expect(after).not.toBeNull();
         expect(after.status).toBe("churned");
+    });
+
+    test("a client with an ACTIVE pickup is blocked until it's resolved", async () => {
+        const client = await makeClient();
+        await makePickup(client, "scheduled"); // still in-flight
+
+        const res = await del(client);
+
+        expect(res.statusCode).toBe(409);
+        expect(res.body.code).toBe("ACTIVE_PICKUPS");
+        expect(res.body.activePickups).toBe(1);
+        // Neither deleted nor archived — left exactly as it was.
+        expect((await Client.findById(client._id)).status).toBe("active");
     });
 
     test("the pickup survives — that is the whole point", async () => {

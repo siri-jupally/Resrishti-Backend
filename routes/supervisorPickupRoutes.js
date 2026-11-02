@@ -40,6 +40,8 @@ const factory = (roleAuth, opts = {}) => {
     // Literal "/clients" before the "/" list route.
     if (opts.allowCreate) {
         r.get("/clients", roleAuth, ctrl.listClientsForPickup);
+        // Literal "/clients/:id/sites" before the "/:id" pickup routes below.
+        r.get("/clients/:id/sites", roleAuth, ctrl.listClientSitesForPickup);
         r.post("/", roleAuth, ctrl.createPickupOnBehalf);
     }
     r.get("/", roleAuth, ctrl.listMyPickups);
@@ -57,6 +59,8 @@ const factory = (roleAuth, opts = {}) => {
     // file off the `weighbridgePhoto` field. lineItems arrives as a JSON
     // string in req.body (multipart can't carry arrays natively).
     r.post("/:id/waste-data", roleAuth, ctrl.wasteDataUpload, ctrl.recordWasteData);
+    // v2 closure (JSON): confirm final stream weights and mark the pickup closed.
+    r.post("/:id/close", roleAuth, ctrl.closeRun);
     return r;
 };
 
