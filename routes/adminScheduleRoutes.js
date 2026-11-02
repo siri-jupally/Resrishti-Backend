@@ -12,10 +12,17 @@ const {
     listSchedules,
     approveSchedule,
     rejectSchedule,
+    pauseSchedule,
+    resumeSchedule,
+    cancelSchedule,
 } = require("../controllers/adminScheduleController");
 
 router.get("/", protectTriage, listSchedules);
 router.patch("/:id/approve", protectTriage, approveSchedule);
 router.patch("/:id/reject", protectTriage, rejectSchedule);
+// Manage an already-approved schedule.
+router.patch("/:id/pause", protectTriage, pauseSchedule);
+router.patch("/:id/resume", protectTriage, resumeSchedule);
+router.patch("/:id/cancel", protectTriage, cancelSchedule);
 
 module.exports = router;

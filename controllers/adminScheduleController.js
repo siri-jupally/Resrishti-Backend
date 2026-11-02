@@ -23,7 +23,7 @@ const {
     buildSupervisorSnapshot,
     actorFromReq,
 } = require("./adminPickupController");
-const { generateDueForSchedule } = require("../services/recurringPickupJob");
+const { generateDueForSchedule, cancelFuturePickupsForSchedule } = require("../services/recurringPickupJob");
 const { sendEmail } = require("../utils/emailService");
 const { sendPush } = require("../utils/push");
 
@@ -192,4 +192,71 @@ const rejectSchedule = async (req, res) => {
     }
 };
 
-module.exports = { listSchedules, approveSchedule, rejectSchedule };
+// Shared loader (admin scope — any schedule, no per-client ownership check).
+const loadSchedule = async (req, res) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ message: "Invalid schedule id" });
+        return null;
+    }
+    const s = await PickupSchedule.findById(req.params.id);
+    if (!s) { res.status(404).json({ message: "Schedule not found" }); return null; }
+    return s;
+};
+
+// PATCH /api/admin/schedules/:id/pause — stop generating new occurrences.
+// Already-generated pickups are left as-is; resume catches up.
+const pauseSchedule = async (req, res) => {
+    if (!canTriage(req)) return res.status(403).json({ message: "Not authorized" });
+    try {
+        const s = await loadSchedule(req, res); if (!s) return;
+        if (s.status !== "active") return res.status(409).json({ message: `Can't pause a ${s.status} schedule.` });
+        s.status = "paused";
+        await s.save();
+        return res.json(withSummary(s.toObject()));
+    } catch (err) {
+        console.error("adminPauseSchedule error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// PATCH /api/admin/schedules/:id/resume — back to active + catch up due pickups.
+const resumeSchedule = async (req, res) => {
+    if (!canTriage(req)) return res.status(403).json({ message: "Not authorized" });
+    try {
+        const s = await loadSchedule(req, res); if (!s) return;
+        if (s.status !== "paused") return res.status(409).json({ message: `Can't resume a ${s.status} schedule.` });
+        s.status = "active";
+        await s.save();
+        try { await generateDueForSchedule(s); } catch (e) { console.error("generateDueForSchedule (admin resume):", e.message); }
+        const fresh = await PickupSchedule.findById(s._id).lean();
+        return res.json(withSummary(fresh));
+    } catch (err) {
+        console.error("adminResumeSchedule error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// PATCH /api/admin/schedules/:id/cancel — stop the series for good AND cancel
+// its not-yet-started pickups (collected / in-progress ones are left intact).
+const cancelSchedule = async (req, res) => {
+    if (!canTriage(req)) return res.status(403).json({ message: "Not authorized" });
+    try {
+        const s = await loadSchedule(req, res); if (!s) return;
+        if (["cancelled", "completed"].includes(s.status)) {
+            return res.status(409).json({ message: `This schedule is already ${s.status}.` });
+        }
+        s.status = "cancelled";
+        s.nextOccurrence = null;
+        await s.save();
+        const cancelledPickups = await cancelFuturePickupsForSchedule(s._id, {
+            reason: String(req.body?.reason || "").trim() || "Recurring schedule cancelled by admin",
+            actor: actorFromReq(req),
+        });
+        return res.json({ ...withSummary(s.toObject()), cancelledPickups });
+    } catch (err) {
+        console.error("adminCancelSchedule error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+module.exports = { listSchedules, approveSchedule, rejectSchedule, pauseSchedule, resumeSchedule, cancelSchedule };

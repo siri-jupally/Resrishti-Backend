@@ -881,7 +881,7 @@ const cancelPickup = async (req, res) => {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
             return res.status(400).json({ message: "Invalid pickup id" });
         }
-        const { cancelledReason } = req.body || {};
+        const { cancelledReason, cancelSeries } = req.body || {};
         const reason = String(cancelledReason || "").trim();
         if (!reason) {
             return res
@@ -997,8 +997,30 @@ const cancelPickup = async (req, res) => {
             }
         }
 
+        // ---- optionally stop the whole recurring series ----
+        // When the admin chose "cancel the series", also cancel the schedule and
+        // its other not-yet-started pickups (this one is already cancelled above,
+        // so the helper skips it).
+        let series = null;
+        const wantSeries = cancelSeries === true || cancelSeries === "true";
+        if (wantSeries && pickup.recurringScheduleId) {
+            const PickupSchedule = require("../models/PickupSchedule");
+            const { cancelFuturePickupsForSchedule } = require("../services/recurringPickupJob");
+            const schedule = await PickupSchedule.findById(pickup.recurringScheduleId);
+            if (schedule && !["cancelled", "completed"].includes(schedule.status)) {
+                schedule.status = "cancelled";
+                schedule.nextOccurrence = null;
+                await schedule.save();
+            }
+            const cancelledPickups = await cancelFuturePickupsForSchedule(pickup.recurringScheduleId, {
+                reason: `Recurring series cancelled: ${reason}`,
+                actor,
+            });
+            series = { scheduleCancelled: true, cancelledPickups };
+        }
+
         emitPickupStatus(pickup, { cancelledReason: pickup.cancelledReason });
-        return res.json(pickup);
+        return res.json(series ? { ...pickup.toObject(), series } : pickup);
     } catch (err) {
         console.error("cancelPickup error:", err);
         return res.status(500).json({ message: err.message });

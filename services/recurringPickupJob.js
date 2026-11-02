@@ -164,6 +164,38 @@ const runRecurringPickups = async ({ now = new Date() } = {}) => {
     return { created, schedules: schedules.length };
 };
 
+// Statuses a schedule's generated pickup can still be cancelled from — anything
+// not yet collected. In-progress (en-route onward) and already-closed pickups
+// are left alone so collected waste is never orphaned.
+const CANCELLABLE_SCHEDULE_PICKUP_STATUSES = ["requested", "accepted", "scheduled", "postponed"];
+
+/**
+ * Cancel the not-yet-started pickups a schedule has already generated. Used when
+ * a schedule is cancelled (by the client or an admin, or via "cancel the whole
+ * series" from a single pickup) so future occurrences don't linger as live
+ * pickups. Collected / in-progress pickups are deliberately untouched.
+ * @returns {Promise<number>} how many pickups were cancelled.
+ */
+const cancelFuturePickupsForSchedule = async (scheduleId, { reason, actor } = {}) => {
+    if (!scheduleId) return 0;
+    const pickups = await Pickup.find({
+        recurringScheduleId: scheduleId,
+        status: { $in: CANCELLABLE_SCHEDULE_PICKUP_STATUSES },
+    });
+    const at = new Date();
+    const note = reason || "Recurring schedule cancelled";
+    let cancelled = 0;
+    for (const p of pickups) {
+        p.status = "cancelled";
+        p.cancelledReason = note;
+        p.evidence = p.evidence || [];
+        p.evidence.push({ status: "cancelled", notes: note, at, by: actor });
+        await p.save();
+        cancelled += 1;
+    }
+    return cancelled;
+};
+
 let _handle = null;
 const startRecurringPickupJob = () => {
     if (_handle) return;
@@ -179,6 +211,7 @@ const stopRecurringPickupJob = () => {
 
 module.exports = {
     generateDueForSchedule,
+    cancelFuturePickupsForSchedule,
     runRecurringPickups,
     startRecurringPickupJob,
     stopRecurringPickupJob,

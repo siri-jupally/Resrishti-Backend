@@ -9,7 +9,7 @@ const PickupSchedule = require("../models/PickupSchedule");
 const Site = require("../models/Site");
 const { activeStreamKeys } = require("../utils/wasteCategories");
 const { validateCadence, describeCadence, atMidnight } = require("../utils/recurrence");
-const { generateDueForSchedule } = require("../services/recurringPickupJob");
+const { generateDueForSchedule, cancelFuturePickupsForSchedule } = require("../services/recurringPickupJob");
 
 // Keep only the cadence fields that belong to the chosen type.
 const normalizeCadence = (c) => {
@@ -157,7 +157,13 @@ const cancelSchedule = async (req, res) => {
         s.status = "cancelled";
         s.nextOccurrence = null;
         await s.save();
-        return res.json(withSummary(s.toObject()));
+        // Cancelling the series also cancels its not-yet-started pickups, so the
+        // client (and the crew) don't keep seeing future occurrences as live.
+        const cancelledPickups = await cancelFuturePickupsForSchedule(s._id, {
+            reason: "Recurring schedule cancelled by the client",
+            actor: { userType: "Client", userId: req.client._id, name: req.client.name },
+        });
+        return res.json({ ...withSummary(s.toObject()), cancelledPickups });
     } catch (err) { console.error("cancelSchedule:", err.message); return res.status(500).json({ message: err.message }); }
 };
 
