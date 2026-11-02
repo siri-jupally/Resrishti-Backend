@@ -33,6 +33,8 @@ const {
   downloadMyReport,
   listMySites,
   listWasteCategories,
+  updateMyProfile,
+  subscribeClient,
 } = require("../controllers/clientPortalController");
 const {
   forgotPassword,
@@ -51,6 +53,10 @@ router.get("/reset-password/:token", verifyResetToken);
 router.post("/reset-password", resetPassword);
 
 router.get("/me", protectClient, getMe);
+// The client edits their own contact + billing details (contactEmail excluded).
+router.patch("/profile", protectClient, updateMyProfile);
+// Save the browser Web Push subscription so client push actually reaches them.
+router.post("/subscribe", protectClient, subscribeClient);
 
 // Chunk 3 (Backend I) — dashboard KPIs + certificate list + presigned download.
 // All three are scoped to req.client._id inside the controller.

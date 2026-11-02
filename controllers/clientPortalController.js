@@ -512,6 +512,86 @@ const listWasteCategories = async (req, res) => {
   }
 };
 
+// PATCH /api/client/profile
+//
+// The client edits their own contact + billing details. contactEmail is the
+// login identity (unique) and is intentionally NOT editable here; status,
+// account manager, tags and the auth fields are off-limits too — only the
+// whitelisted fields below are ever touched.
+const CLIENT_INDUSTRIES = [
+  "Hospital", "FMCG", "IT", "Industrial", "Hospitality",
+  "Education", "Government", "Retail", "Other",
+];
+const updateMyProfile = async (req, res) => {
+  try {
+    const client = req.client; // full, savable mongoose doc (see authClient)
+    const b = req.body || {};
+
+    if (b.name !== undefined) {
+      const v = String(b.name).trim();
+      if (!v) return res.status(400).json({ message: "Organisation name can't be empty" });
+      client.name = v;
+    }
+    if (b.contactName !== undefined) {
+      const v = String(b.contactName).trim();
+      if (!v) return res.status(400).json({ message: "Contact name can't be empty" });
+      client.contactName = v;
+    }
+    if (b.contactPhone !== undefined) {
+      const v = String(b.contactPhone).trim();
+      if (!v) return res.status(400).json({ message: "Contact phone can't be empty" });
+      client.contactPhone = v;
+    }
+    if (b.gstin !== undefined) client.gstin = String(b.gstin).trim();
+    if (b.industry !== undefined) {
+      const v = String(b.industry).trim();
+      if (v && !CLIENT_INDUSTRIES.includes(v)) {
+        return res.status(400).json({ message: "Invalid industry" });
+      }
+      client.industry = v || undefined;
+    }
+    if (b.billingAddress && typeof b.billingAddress === "object") {
+      const cur = client.billingAddress
+        ? (client.billingAddress.toObject ? client.billingAddress.toObject() : { ...client.billingAddress })
+        : {};
+      for (const k of ["line1", "line2", "city", "state", "postalCode", "country"]) {
+        if (b.billingAddress[k] !== undefined) cur[k] = String(b.billingAddress[k]).trim();
+      }
+      client.billingAddress = cur;
+      client.markModified("billingAddress");
+    }
+
+    await client.save();
+    // Re-read so the response matches getMe exactly (passwordHash stays excluded
+    // by the schema's select:false).
+    const fresh = await Client.findById(client._id);
+    return res.json(fresh);
+  } catch (err) {
+    console.error("updateMyProfile error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// POST /api/client/subscribe
+//
+// Saves the browser's Web Push subscription onto the client so they actually
+// receive the push notifications the app already tries to send everywhere via
+// safePush(client.pushSubscription, …). Same shape as the admin/manager/employee
+// subscribe endpoints.
+const subscribeClient = async (req, res) => {
+  try {
+    const sub = req.body;
+    if (!sub || !sub.endpoint) {
+      return res.status(400).json({ message: "A valid push subscription is required" });
+    }
+    await Client.updateOne({ _id: req.client._id }, { $set: { pushSubscription: sub } });
+    return res.json({ message: "Notifications enabled" });
+  } catch (err) {
+    console.error("subscribeClient error:", err.message);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   loginClient,
   listWasteCategories,
@@ -522,4 +602,6 @@ module.exports = {
   downloadMyReport,
   listMySites,
   downloadMyCertificate,
+  updateMyProfile,
+  subscribeClient,
 };
