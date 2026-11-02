@@ -526,8 +526,20 @@ const getReport = async (req, res) => {
             .lean();
         if (!report) return res.status(404).json({ message: "Report not found" });
 
+        // Full revision history: every revision shares the same reportNumber, so
+        // the whole chain (rev 1 → latest) comes back for an audit timeline —
+        // when each was generated / issued / sent and by whom, and which ones
+        // were superseded. Oldest revision first.
+        const history = await Report.find({
+            reportNumber: report.reportNumber,
+            client: report.client?._id || report.client,
+        })
+            .select("revision status generatedAt issuedAt issuedBy sentAt sentBy createdAt updatedAt")
+            .sort({ revision: 1 })
+            .lean();
+
         const previewUrl = await presignFor(report.pdf);
-        return res.json({ report, previewUrl });
+        return res.json({ report, previewUrl, history });
     } catch (err) {
         console.error("getReport error:", err.message);
         return res.status(500).json({ message: err.message });
