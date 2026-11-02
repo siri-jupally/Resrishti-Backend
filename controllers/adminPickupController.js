@@ -862,9 +862,14 @@ const reassignSupervisor = async (req, res) => {
 /**
  * PATCH /api/admin/pickups/:id/cancel
  *
- * Triage-side cancellation (admin/coordinator-initiated). Refused if the
- * pickup has already reached terminal states (cert-sent, cancelled,
- * rejected) — those should stay immutable for the audit trail.
+ * Triage-side cancellation (admin/coordinator-initiated). Cancel only applies
+ * BEFORE the waste is collected. It is refused once the pickup is:
+ *   - completed (processed/cert-draft/cert-issued/cert-sent/closed) — the waste
+ *     was physically collected and weighed, so "cancel" is a contradiction and
+ *     would orphan the recorded weights (they'd linger on the doc but drop out
+ *     of the monthly CoD, which filters on status). Fix a mistaken record with a
+ *     void/delete, or a document problem with a certificate cancel/revise.
+ *   - already final (cancelled/rejected) — immutable for the audit trail.
  */
 const cancelPickup = async (req, res) => {
     if (!canTriage(req)) {
@@ -884,8 +889,6 @@ const cancelPickup = async (req, res) => {
                 .json({ message: "cancelledReason is required" });
         }
 
-        const terminal = ["cert-sent", "cancelled", "rejected"];
-
         const pickup = await Pickup.findById(req.params.id).populate(
             "client",
             "name contactName contactEmail pushSubscription"
@@ -893,7 +896,16 @@ const cancelPickup = async (req, res) => {
         if (!pickup) {
             return res.status(404).json({ message: "Pickup not found" });
         }
-        if (terminal.includes(pickup.status)) {
+        // A completed collection can't be cancelled — the waste was physically
+        // collected and weighed. Cancelling would orphan those weights (they stay
+        // on the doc but drop out of the monthly CoD's status-filtered total).
+        if (Pickup.CLOSED_EQUIVALENT_STATUSES.includes(pickup.status)) {
+            return res.status(409).json({
+                message:
+                    "This pickup is already completed — the waste was collected and weighed, so it can't be cancelled. To fix a mistaken record delete it; to fix its certificate, cancel or revise the certificate instead.",
+            });
+        }
+        if (["cancelled", "rejected"].includes(pickup.status)) {
             return res.status(409).json({
                 message: `Pickup is already in terminal status '${pickup.status}'`,
             });
