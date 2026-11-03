@@ -164,3 +164,66 @@ describe("a client requesting their own pickup", () => {
         }
     });
 });
+
+// ───────── backdated pickups stay progressable (overdue guard) ─────────
+// The overdue guard blocks progressing a stale/missed assignment. A pickup
+// that was deliberately backdated (dated before it was created) is NOT a miss,
+// so it must stay progressable — the regression this fixes.
+describe("progressing a backdated pickup", () => {
+    const Employee = require("../models/Employee");
+    const { updatePickupStatus } = require("../controllers/supervisorPickupController");
+
+    const mockRes = () => {
+        const r = { statusCode: 200, body: null, status(c) { r.statusCode = c; return r; }, json(d) { r.body = d; return r; } };
+        return r;
+    };
+
+    let agent;
+    beforeEach(async () => {
+        await Employee.deleteMany({});
+        agent = await Employee.create({
+            email: `agent_${Math.random().toString(16).slice(2)}@test.com`,
+            password: "x", manager: new mongoose.Types.ObjectId(),
+            name: "Field Agent", canSupervise: true,
+        });
+    });
+
+    // Self-assigned to the agent, so it has a (past) scheduledDate + supervisor.
+    const makeAssigned = (requestedDate) => create({
+        requestedDate, allowPastDate: true,
+        createdByActor: { userType: "Employee", userId: agent._id, name: agent.name },
+        assignToActor: true,
+    });
+
+    const advance = async (pickup, status) => {
+        const res = mockRes();
+        await updatePickupStatus({
+            params: { id: String(pickup._id) },
+            body: { status },
+            employee: agent,
+            files: { photos: [{ buffer: Buffer.from("selfie"), mimetype: "image/jpeg" }] },
+        }, res);
+        return res;
+    };
+
+    test("a backdated pickup is not overdue — the agent can advance it", async () => {
+        const p = await makeAssigned(dayOffset(-3)); // dated 3 days ago, created today
+        expect(p.status).toBe("accepted");
+        const res = await advance(p, "v2-departed");
+        expect(res.statusCode).not.toBe(409);
+        expect((await Pickup.findById(p._id)).status).toBe("v2-departed");
+    });
+
+    test("a genuinely missed pickup is still blocked as overdue", async () => {
+        const p = await makeAssigned(dayOffset(0)); // created + dated today (valid)
+        // Make it a real miss: created AND scheduled three days ago, not backdated.
+        const threeDaysAgo = new Date(Date.now() - 3 * 864e5);
+        await Pickup.collection.updateOne(
+            { _id: p._id },
+            { $set: { scheduledDate: threeDaysAgo, createdAt: threeDaysAgo } }
+        );
+        const res = await advance(await Pickup.findById(p._id), "v2-departed");
+        expect(res.statusCode).toBe(409);
+        expect(res.body.overdue).toBe(true);
+    });
+});

@@ -440,7 +440,17 @@ const updatePickupStatus = async (req, res) => {
         ) {
             const startToday = new Date();
             startToday.setHours(0, 0, 0, 0);
-            if (new Date(pickup.scheduledDate) < startToday) {
+            // An intentionally BACKDATED pickup — an agent recording a collection
+            // that already happened, via the "past date" option — is dated for a
+            // day BEFORE it was created. That is not a stale/missed assignment, so
+            // it isn't "overdue" and must stay progressable. A genuinely missed
+            // pickup is dated on or after its creation day.
+            const createdDay = new Date(pickup.createdAt || startToday);
+            createdDay.setHours(0, 0, 0, 0);
+            const schedDay = new Date(pickup.scheduledDate);
+            schedDay.setHours(0, 0, 0, 0);
+            const backdated = schedDay < createdDay;
+            if (!backdated && new Date(pickup.scheduledDate) < startToday) {
                 return res.status(409).json({
                     message: "This pickup is overdue — its scheduled day has passed, so it can no longer be collected. Close it with a reason instead.",
                     overdue: true,
