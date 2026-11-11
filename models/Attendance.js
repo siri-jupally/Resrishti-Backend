@@ -116,6 +116,11 @@ const attendanceSchema = new mongoose.Schema(
         extraPayDecidedByName: { type: String, trim: true },
         extraPayDecidedAt: { type: Date },
         locationWithinBoundary: { type: Boolean },
+        // true when a WFO check-in captured NO location at all (distinct from a
+        // check-in confirmed outside the office). Both await approval, but only
+        // this flag lets the UI say "no location captured" instead of mislabelling
+        // the day as "away from the office" (#13).
+        locationMissing: { type: Boolean, default: false },
     },
     { timestamps: true }
 );

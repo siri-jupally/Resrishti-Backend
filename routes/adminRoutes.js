@@ -83,7 +83,10 @@ const attendanceLock = require('../controllers/attendanceLockController');
 router.get('/attendance/locks', protect, attendanceLock.listLocks);
 router.get('/attendance/locks/:month', protect, attendanceLock.getLock);
 // Every unresolved record standing between the month and being closed.
-router.get('/attendance/locks/:month/issues', protect, require('../controllers/attendanceLockIssues').getMonthIssues);
+const lockIssues = require('../controllers/attendanceLockIssues');
+router.get('/attendance/locks/:month/issues', protect, lockIssues.getMonthIssues);
+// Ping the managers who own this month's pending employee corrections (#4).
+router.post('/attendance/locks/:month/notify-corrections', protect, lockIssues.notifyCorrectionManagers);
 // Extra-pay days and leave days: already decided, but they are where
 // attendance turns into money, so an admin signs them off before the close.
 const lockSettlements = require('../controllers/attendanceLockSettlements');

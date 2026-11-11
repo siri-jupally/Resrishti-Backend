@@ -99,6 +99,8 @@ const managerAttendanceSchema = new mongoose.Schema(
         extraPayDecidedByName: { type: String, trim: true },
         extraPayDecidedAt: { type: Date },
         locationWithinBoundary: { type: Boolean },
+        // See Attendance.js — "no location captured" vs "outside premises" (#13).
+        locationMissing: { type: Boolean, default: false },
     },
     { timestamps: true }
 );

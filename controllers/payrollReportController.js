@@ -63,6 +63,35 @@ const getRegister = async (req, res) => {
 
         const lines = await PayrollLine.find({ run: run._id }).sort({ personName: 1 }).lean();
 
+        // Payments + payslips at a glance, computed straight from the lines so it
+        // is always self-consistent (run.payment can lag a line edit). Answers
+        // the three questions in one place: how many paid, how many payslips
+        // released, and how many are still pending.
+        const payments = lines.reduce(
+            (a, l) => { const s = l.payment?.status || "pending"; a[s] = (a[s] || 0) + 1; return a; },
+            { paid: 0, failed: 0, pending: 0 }
+        );
+        const payslipsReleased = lines.filter((l) => l.payslip?.releasedAt).length;
+        // The actionable pending number: paid people who do not yet have a slip.
+        const paidButNoPayslip = lines.filter(
+            (l) => l.payment?.status === "paid" && !l.payslip?.releasedAt
+        ).length;
+        const summary = {
+            total: lines.length,
+            payments: {
+                paid: payments.paid,
+                failed: payments.failed,
+                pending: payments.pending,
+                paidAmount: run.payment?.paidAmount || 0,
+            },
+            payslips: {
+                released: payslipsReleased,
+                pending: lines.length - payslipsReleased,
+            },
+            // Paid but payslip not yet out — what still needs doing.
+            paidButNoPayslip,
+        };
+
         return res.json({
             month,
             run: {
@@ -73,6 +102,7 @@ const getRegister = async (req, res) => {
                 approvedBy: run.approvedBy,
                 exceptions: run.exceptions || [],
             },
+            summary,
             totals: lines.reduce((acc, l) => addTo(acc, l), emptyTotals()),
             byDepartment: groupBy(lines, "department", "No department"),
             byEmploymentType: groupBy(lines, "employmentType", "Not set"),

@@ -98,6 +98,9 @@ const makeLine = (person, personType, overrides = {}) =>
         overtimePay: 0,
         gross: 30000,
         net: 30000,
+        // Payslips now release per PAID line (#15), so a line expecting one must
+        // be paid. Default to paid; tests that need an unpaid line override it.
+        payment: { status: "paid" },
         ...overrides,
     });
 
@@ -147,13 +150,33 @@ describe("releasing payslips", () => {
         expect(renderPayslipPdf).not.toHaveBeenCalled();
     });
 
-    test("an approved but unpaid run produces none either", async () => {
+    test("an approved run releases nothing for a person not yet paid", async () => {
         // Approved means the figures are agreed, not that the money has gone.
-        // A payslip for a salary nobody has received yet is a complaint.
+        // A payslip for a salary nobody has received yet is a complaint — so an
+        // unpaid line produces nothing, even though release is now allowed on an
+        // approved run (#15).
         run.status = "approved";
         await run.save();
-        await makeLine(employee, "Employee");
-        expect((await release()).statusCode).toBe(409);
+        await makeLine(employee, "Employee", { payment: { status: "pending" } });
+        const res = await release();
+        expect(res.statusCode).toBe(200);
+        expect(res.body.produced).toBe(0);
+        expect(res.body.notYetPaid).toBe(1);
+    });
+
+    test("one paid, one not: only the paid person's payslip releases (no interdependency, #15)", async () => {
+        run.status = "approved";
+        await run.save();
+        await makeLine(employee, "Employee", { payment: { status: "paid" } });
+        await makeLine(other, "Employee", { payment: { status: "pending" } });
+        const res = await release();
+        expect(res.statusCode).toBe(200);
+        expect(res.body.produced).toBe(1);
+        expect(res.body.notYetPaid).toBe(1);
+        const paidLine = await PayrollLine.findOne({ personId: employee._id });
+        const heldLine = await PayrollLine.findOne({ personId: other._id });
+        expect(paidLine.payslip?.releasedAt).toBeTruthy();
+        expect(heldLine.payslip?.key).toBeFalsy();
     });
 
     test("a closed run still releases, for anyone added late", async () => {

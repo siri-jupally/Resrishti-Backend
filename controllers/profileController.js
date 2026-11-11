@@ -46,6 +46,13 @@ function computeProfileComplete(user) {
 const BANK_FIELDS = ["accountHolderName", "accountNumber", "ifsc", "bankName", "branch"];
 
 const applyBankChange = (user, incoming, actorName) => {
+    // Multipart form-data flattens everything to strings, so the profile form
+    // sends `bank` as a JSON string (see ProfilePage.jsx). Parse it back before
+    // the object guard, or the whole bank block is silently dropped.
+    if (typeof incoming === "string") {
+        try { incoming = JSON.parse(incoming); }
+        catch { return false; }
+    }
     if (!incoming || typeof incoming !== "object") return false;
 
     const next = {};
@@ -84,15 +91,16 @@ const applyBankChange = (user, incoming, actorName) => {
 /** Tell the person their salary account changed. Best-effort. */
 const notifyBankChange = async (user) => {
     try {
-        await sendEmail({
-            to: user.email,
-            subject: "Your salary account was updated",
-            html: `<p>Hello ${user.name || ""},</p>
+        await sendEmail(
+            user.email,
+            "Your salary account was updated",
+            undefined,
+            `<p>Hello ${user.name || ""},</p>
                    <p>The bank account your salary is paid into was just changed on your
                    ReSrishti profile. Payments will now go to the account ending
                    <strong>${String(user.bank?.accountNumber || "").slice(-4)}</strong>.</p>
-                   <p>If you did not make this change, tell your administrator straight away.</p>`,
-        });
+                   <p>If you did not make this change, tell your administrator straight away.</p>`
+        );
     } catch (err) {
         // A failed notification must never fail the profile save.
         console.error("Bank-change email failed:", err.message);

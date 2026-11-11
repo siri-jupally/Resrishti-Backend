@@ -117,6 +117,8 @@ const checkIn = async (req, res) => {
         }
 
         let locationWithinBoundary = null;
+        // "No GPS" vs "confirmed outside premises" — keep them distinct (#13).
+        let locationMissing = false;
         let isLateCheckIn = false;
 
         if (lat !== undefined && lng !== undefined) {
@@ -144,6 +146,7 @@ const checkIn = async (req, res) => {
             policy?.officeLocations?.length > 0
         ) {
             locationWithinBoundary = false;
+            locationMissing = true; // no location captured, not "outside premises"
         }
 
         // Admin toggle: refuse out-of-premises office check-in outright when it
@@ -226,6 +229,7 @@ const checkIn = async (req, res) => {
                 if (locationWithinBoundary === false) {
                     existing.approvalStatus = "pending";
                     existing.locationWithinBoundary = false;
+                    existing.locationMissing = locationMissing;
                 }
                 if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
                 await existing.save();
@@ -240,6 +244,7 @@ const checkIn = async (req, res) => {
             existing.isLateCheckIn = isLateCheckIn;
             existing.isWeekendWork = isWeekOff(today, policy);
             existing.locationWithinBoundary = locationWithinBoundary;
+            existing.locationMissing = locationMissing;
             if (wfhTaskSummary) existing.wfhTaskSummary = wfhTaskSummary;
             await existing.save();
             return res.status(200).json(existing);
@@ -255,6 +260,7 @@ const checkIn = async (req, res) => {
             isLateCheckIn,
             isWeekendWork: isWeekOff(today, policy),
             locationWithinBoundary,
+            locationMissing,
             wfhTaskSummary: wfhTaskSummary || undefined,
         });
 

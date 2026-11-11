@@ -1,14 +1,17 @@
 /*
   payrollRoutes.js — everything under /api/payroll.
 
-  Three gates, matching the module's control model (middleware/authPayroll.js):
-    protectPayroll   read access — an assigned accountant or an admin
-    protectPreparer  preparing and calculating — either of them
-    protectApprover  admin only — approving, closing, and setting pay
+  Four gates, matching the module's control model (middleware/authPayroll.js):
+    protectPayroll     read access — an assigned accountant or an admin
+    protectAccountant  GENERATING a run (calculate/adjust/submit) — the
+                       accountant; an admin only to bootstrap when none assigned
+    protectPreparer    disbursement (record payments / bank file) — either of them
+    protectApprover    admin only — approving, closing, and setting pay
 
   Setting what somebody is paid sits behind the approver gate deliberately: an
   accountant who could both set the rate and run the payroll would make
-  maker-checker decorative.
+  maker-checker decorative. Generating sits behind protectAccountant so an admin
+  does not prepare a run and then approve their own work (#12).
 
   Nothing here is public. The accountant login is gone — an accountant is an
   employee an admin has assigned, and arrives with an employee token.
@@ -18,6 +21,7 @@ const router = express.Router();
 
 const {
     protectPayroll,
+    protectAccountant,
     protectPreparer,
     protectApprover,
 } = require("../middleware/authPayroll");
@@ -78,10 +82,12 @@ router.post("/profiles/remind-bank", protectPreparer, profiles.remindMissingBank
 router.get("/runs", protectPayroll, runs.listRuns);
 router.get("/runs/:month", protectPayroll, runs.getRun);
 router.get("/runs/:month/audit", protectPayroll, runs.getRunAudit);
-router.post("/runs/:month/calculate", protectPreparer, runs.calculateRun);
-router.post("/runs/:month/lines/:lineId/adjust", protectPreparer, runs.adjustLine);
+// Generating a run is the accountant's job — an admin only when none is assigned
+// (protectAccountant), so an admin never prepares a run and then approves it (#12).
+router.post("/runs/:month/calculate", protectAccountant, runs.calculateRun);
+router.post("/runs/:month/lines/:lineId/adjust", protectAccountant, runs.adjustLine);
 // Draft -> pending-approval. The preparer submits their own work.
-router.post("/runs/:month/submit", protectPreparer, runs.submitRun);
+router.post("/runs/:month/submit", protectAccountant, runs.submitRun);
 // Admin only, both ways. Approval is the control the whole lifecycle exists for.
 router.post("/runs/:month/approve", protectApprover, runs.approveRun);
 router.post("/runs/:month/reject", protectApprover, runs.rejectRun);

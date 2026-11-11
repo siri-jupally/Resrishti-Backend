@@ -27,6 +27,7 @@ const Manager = require("../models/Manager");
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 const { actorFromReq } = require("../utils/payrollActor");
+const { getSettings } = require("../utils/payrollDefaults");
 
 const audit = async ({ action, run, line, month, req, detail, reason }) => {
     try {
@@ -264,6 +265,7 @@ const recordPayments = async (req, res) => {
             });
         }
 
+        const settings = await getSettings();
         const applied = [];
         const problems = [];
         for (const o of outcomes) {
@@ -281,7 +283,8 @@ const recordPayments = async (req, res) => {
                 problems.push({
                     lineId: o.lineId,
                     name: line.personName,
-                    message: "No bank account on file",
+                    code: "noBankDetails",
+                    message: `${line.personName} has no bank account on file — they enter it on their own profile before they can be paid.`,
                 });
                 continue;
             }
@@ -291,6 +294,7 @@ const recordPayments = async (req, res) => {
                 problems.push({
                     lineId: o.lineId,
                     name: line.personName,
+                    code: "referenceRequired",
                     message: "A bank reference (UTR) is required to mark a payment as paid.",
                 });
                 continue;
@@ -305,10 +309,35 @@ const recordPayments = async (req, res) => {
             // eslint-disable-next-line no-await-in-loop
             await line.save();
             applied.push({ lineId: String(line._id), name: line.personName, status: o.status });
+
+            // Release this person's payslip the moment they are paid — no waiting
+            // for the whole run, no interdependency. Best-effort: a render failure
+            // must not fail the payment that was just recorded.
+            if (o.status === "paid") {
+                try {
+                    // Lazy require: keeps payslipPdf (ESM) off this module's load
+                    // path, and the try/catch swallows a render failure so it
+                    // never fails the payment that was just recorded.
+                    const { releasePayslipForLine } = require("./payslipController");
+                    // eslint-disable-next-line no-await-in-loop
+                    await releasePayslipForLine(line, run.month, settings);
+                } catch (slipErr) {
+                    console.error(`auto-release payslip failed for ${line.personName}:`, slipErr.message);
+                }
+            }
         }
 
         if (applied.length === 0) {
-            return res.status(400).json({ message: "Nothing was recorded.", problems });
+            // Surface the real per-person reason instead of a blank 400. A
+            // single-row "Mark paid" that fails is almost always this person's
+            // missing bank account or missing UTR — say which, with a code the
+            // UI can render inline against the row.
+            const first = problems[0] || {};
+            return res.status(422).json({
+                message: first.message || "Nothing was recorded.",
+                code: first.code,
+                problems,
+            });
         }
 
         const { counts, total } = await rollUp(run);

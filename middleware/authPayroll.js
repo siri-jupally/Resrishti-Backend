@@ -151,4 +151,31 @@ const protectApprover = async (req, res, next) => {
     });
 };
 
-module.exports = { protectPayroll, protectPreparer, protectApprover, resolveActor };
+/*
+  Who may GENERATE a run — calculate it, adjust lines, submit it for approval:
+  the assigned accountant. An admin may do so ONLY to bootstrap, when nobody has
+  been assigned as an accountant yet, so a month is never left unrunnable. The
+  moment an accountant exists, preparing is their job and the admin is barred
+  here — the admin approves, and must not prepare a run and then approve their
+  own work ("admin should not generate payroll", #12). Disbursement
+  (recordPayments / bank-file) stays on protectPreparer: paying out is an
+  operational step, not a maker–checker violation.
+*/
+const protectAccountant = async (req, res, next) => {
+    const actor = await resolveActor(req);
+    if (!actor?.role) return deny(res, actor);
+    if (actor.role === "accountant") return next();
+    if (actor.role === "admin") {
+        const assigned =
+            (await Employee.countDocuments({ canPreparePayroll: true })) +
+            (await Manager.countDocuments({ canPreparePayroll: true }));
+        if (assigned === 0) return next(); // bootstrap: nobody assigned yet
+        return res.status(403).json({
+            message:
+                "An accountant is assigned to prepare payroll. Admins approve runs — they don't generate them.",
+        });
+    }
+    return deny(res, actor);
+};
+
+module.exports = { protectPayroll, protectPreparer, protectAccountant, protectApprover, resolveActor };

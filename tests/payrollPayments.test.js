@@ -204,7 +204,10 @@ describe("recording payments", () => {
         const res = await record({
             outcomes: [{ lineId: String(people[0].line._id), status: "paid" }],
         });
-        expect(res.statusCode).toBe(400);
+        // A single-row failure now answers 422 with the specific reason/code,
+        // not a blank 400 (#14).
+        expect(res.statusCode).toBe(422);
+        expect(res.body.code).toBe("referenceRequired");
         const line = await PayrollLine.findById(people[0].line._id).lean();
         expect(line.payment.status).toBe("pending");
     });
@@ -275,7 +278,9 @@ describe("recording payments", () => {
             outcomes: [{ lineId: String(people[0].line._id), status: "paid", reference: "UTR1" }],
         });
 
-        expect(res.statusCode).toBe(400);
+        // 422 + a specific code the UI can render inline, not a blank 400 (#14).
+        expect(res.statusCode).toBe(422);
+        expect(res.body.code).toBe("noBankDetails");
         const line = await PayrollLine.findById(people[0].line._id).lean();
         expect(line.payment.status).toBe("pending");
     });

@@ -599,6 +599,11 @@ const approveRun = async (req, res) => {
         const settings = await getSettings();
         // Under maker–checker the person approving must not be the person who
         // prepared it. Approving your own work is not a second pair of eyes.
+        // (The primary #12 control is protectAccountant on the generate routes:
+        // once an accountant is assigned an admin cannot prepare at all, so an
+        // admin approving is always a second pair of eyes. This stays gated on
+        // the setting so single-approver and the no-accountant bootstrap — where
+        // one admin legitimately does everything — are not deadlocked.)
         if (settings.approvalDepth === "makerChecker") {
             const actor = actorFromReq(req);
             // The approver must not be EITHER person who prepared the run — the

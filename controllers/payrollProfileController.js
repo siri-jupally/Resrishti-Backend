@@ -270,6 +270,15 @@ const upsertProfile = async (req, res) => {
         if (!["monthly", "daily"].includes(payModel)) {
             return res.status(400).json({ message: "payModel must be monthly or daily" });
         }
+        // A daily-wage worker paid on the MONTHLY model is sent down the salaried
+        // path and given a fixed base — the config mismatch behind #9. The two
+        // must agree: daily-wage is paid per day.
+        if (employmentType === "daily-wage" && payModel === "monthly") {
+            return res.status(400).json({
+                message: "A daily-wage worker is paid per day — set the pay model to 'daily', not 'monthly'.",
+                code: "payModelMismatch",
+            });
+        }
 
         let profile = await PayrollProfile.findOne({ personType, personId: person._id });
         const wasCreate = !profile;

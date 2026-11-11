@@ -46,6 +46,58 @@ const nextPayslipNumber = async (month) => {
     return `PS-${month}-${String(seq).padStart(4, "0")}`;
 };
 
+/*
+  Render, store, release and announce ONE line's payslip. Shared by the bulk
+  release endpoint and by recordPayments, which calls it the moment a person is
+  marked paid — so one person's held or failed payment never blocks anybody
+  else's payslip. Idempotent: a line that already has a payslip key is left
+  untouched. Returns "released" or "skipped".
+
+  The invariant from rule (1) above still holds: this is only ever called for a
+  line that is approved AND paid, whose figure cannot change without an explicit
+  reopen (which resets the payment), so nothing hands out a figure still in flux.
+*/
+const releasePayslipForLine = async (line, month, settings) => {
+    if (line.payslip?.key) return "skipped"; // already has one
+
+    const payslipNumber = line.payslip?.number || (await nextPayslipNumber(month));
+    const buffer = await renderPayslipPdf(line.toObject(), {
+        payslipNumber,
+        note: settings.payslipNote,
+    });
+    const stored = await uploadFile({
+        folder: `payslips/${month}`,
+        originalName: `${payslipNumber}.pdf`,
+        buffer,
+        contentType: "application/pdf",
+    });
+    line.payslip = {
+        number: payslipNumber,
+        key: stored.key,
+        bucket: stored.bucket,
+        generatedAt: new Date(),
+        releasedAt: new Date(),
+    };
+    await line.save();
+
+    // Tell them it is there. A push failure must not stop anything.
+    try {
+        const model = line.personType === "Manager" ? Manager : Employee;
+        const person = await model.findById(line.personId).select("pushSubscription").lean();
+        if (person?.pushSubscription) {
+            await notifyIfEnabled("attendance", person.pushSubscription, {
+                title: "Your payslip is ready",
+                body: `Your payslip for ${month} is available to download.`,
+                icon: "/android-chrome-512x512.png",
+                data: { url: `/${line.personType.toLowerCase()}/dashboard?tab=payslips` },
+            });
+        }
+    } catch (pushErr) {
+        console.error("payslip push failed:", pushErr.message);
+    }
+    return "released";
+};
+
 // POST /api/payroll/runs/:month/payslips/release
 //
 // Renders a payslip for every line that does not have one, stores it, and tells
@@ -61,10 +113,13 @@ const releasePayslips = async (req, res) => {
 
         const run = await PayrollRun.findOne({ month });
         if (!run) return res.status(404).json({ message: "Nothing has been calculated for this month" });
-        if (!["paid", "closed"].includes(run.status)) {
+        // Payslips may go out once a run is approved, but only for people who
+        // have ACTUALLY been paid (the per-line gate below). One person's held
+        // payment no longer keeps everybody else's payslip locked.
+        if (!["approved", "paid", "closed"].includes(run.status)) {
             return res.status(409).json({
                 message:
-                    "Payslips go out once the salaries have actually been paid. A figure somebody can still change is not something to put in people's hands.",
+                    "Payslips go out once the run is approved and the salary has actually been paid. A figure somebody can still change is not something to put in people's hands.",
             });
         }
 
@@ -73,50 +128,17 @@ const releasePayslips = async (req, res) => {
 
         const produced = [];
         const failed = [];
+        const notYetPaid = [];
 
         for (const line of lines) {
-            if (line.payslip?.key) continue;   // already has one
-
+            if (line.payslip?.key) continue;            // already has one
+            if (line.payment?.status !== "paid") {      // not paid yet — no slip
+                notYetPaid.push({ person: line.personName });
+                continue;
+            }
             try {
-                const payslipNumber = line.payslip?.number || (await nextPayslipNumber(month));
-                const buffer = await renderPayslipPdf(line.toObject(), {
-                    payslipNumber,
-                    note: settings.payslipNote,
-                });
-
-                const stored = await uploadFile({
-                    folder: `payslips/${month}`,
-                    originalName: `${payslipNumber}.pdf`,
-                    buffer,
-                    contentType: "application/pdf",
-                });
-
-                line.payslip = {
-                    number: payslipNumber,
-                    key: stored.key,
-                    bucket: stored.bucket,
-                    generatedAt: new Date(),
-                    releasedAt: new Date(),
-                };
-                await line.save();
-                produced.push({ person: line.personName, number: payslipNumber });
-
-                // Tell them it is there. A push failure must not stop the rest
-                // of the run being released.
-                try {
-                    const model = line.personType === "Manager" ? Manager : Employee;
-                    const person = await model.findById(line.personId).select("pushSubscription").lean();
-                    if (person?.pushSubscription) {
-                        await notifyIfEnabled("attendance", person.pushSubscription, {
-                            title: "Your payslip is ready",
-                            body: `Your payslip for ${month} is available to download.`,
-                            icon: "/android-chrome-512x512.png",
-                            data: { url: `/${line.personType.toLowerCase()}/dashboard?tab=payslips` },
-                        });
-                    }
-                } catch (pushErr) {
-                    console.error("payslip push failed:", pushErr.message);
-                }
+                await releasePayslipForLine(line, month, settings);
+                produced.push({ person: line.personName, number: line.payslip.number });
             } catch (err) {
                 console.error(`payslip render failed for ${line.personName}:`, err.message);
                 failed.push({ person: line.personName, reason: err.message });
@@ -128,13 +150,14 @@ const releasePayslips = async (req, res) => {
             run: run._id,
             month,
             actor: actorFromReq(req),
-            detail: { produced: produced.length, failed: failed.length },
+            detail: { produced: produced.length, failed: failed.length, notYetPaid: notYetPaid.length },
         });
 
         return res.json({
             month,
             produced: produced.length,
-            alreadyHad: lines.length - produced.length - failed.length,
+            alreadyHad: lines.length - produced.length - failed.length - notYetPaid.length,
+            notYetPaid: notYetPaid.length,
             failed,
         });
     } catch (err) {
@@ -262,6 +285,7 @@ const downloadMyPayslip = async (req, res) => {
 
 module.exports = {
     releasePayslips,
+    releasePayslipForLine,
     listRunPayslips,
     listMyPayslips,
     downloadMyPayslip,
