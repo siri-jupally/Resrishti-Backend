@@ -100,8 +100,30 @@ const buildLeaveMap = async (month) => {
     return byPerson;
 };
 
+/*
+  Atomically move a run from one status to another. The whole lifecycle is
+  read-modify-write with no DB transaction, so two privileged writers acting on
+  the same month could otherwise lose each other's updates and reach impossible
+  states (e.g. a stale "approved" written back over a fresh recalculation, or an
+  approved run with pending lines). This gate makes the change conditional on the
+  status we read still being current: if it changed underneath us, modifiedCount
+  is 0 and the caller must reload rather than overwrite. Returns the updated run,
+  or null if the precondition no longer holds.
+*/
+const casStatus = (id, from, set) =>
+    PayrollRun.findOneAndUpdate({ _id: id, status: from }, { $set: set }, { new: true });
+
+const STALE_RUN = {
+    message: "This run changed while you were working on it — reload and try again.",
+    code: "runChanged",
+};
+
 // POST /api/payroll/runs/:month/calculate
 const calculateRun = async (req, res) => {
+    // Lease bookkeeping for the finally: release ONLY the lease this call took, so
+    // a refused second generate never clears the lease the first one is holding.
+    let leaseHeld = false;
+    let leaseRunId = null;
     try {
         const { month } = req.params;
         if (!MONTH_RE.test(month)) {
@@ -126,6 +148,28 @@ const calculateRun = async (req, res) => {
                 message: `${month} is ${existing.status}. Send it back to draft before recalculating.`,
                 runStatus: existing.status,
             });
+        }
+
+        // #6: serialize re-generation of an existing draft. Two "Generate" presses
+        // on the same month otherwise interleave the delete-and-rebuild below into
+        // duplicate-key errors or a half-built line set. Claim an exclusive lease
+        // (released in the finally); a first-ever calc is serialized instead by the
+        // month unique index.
+        let run = null;
+        if (existing) {
+            run = await PayrollRun.findOneAndUpdate(
+                { _id: existing._id, status: "draft", calculating: { $ne: true } },
+                { $set: { calculating: true } },
+                { new: true }
+            );
+            if (!run) {
+                return res.status(409).json({
+                    message: `A calculation for ${month} is already running, or it is no longer a draft. Try again in a moment.`,
+                    code: "calculating",
+                });
+            }
+            leaseHeld = true;
+            leaseRunId = run._id;
         }
 
         const [settings, attendancePolicy, profiles, policies] = await Promise.all([
@@ -256,9 +300,7 @@ const calculateRun = async (req, res) => {
         const actor = actorFromReq(req);
         const now = new Date();
 
-        const run =
-            existing ||
-            new PayrollRun({ month });
+        run = run || new PayrollRun({ month });
         // Draft. Generating is not submitting: the preparer reviews and fixes
         // first, which is also what makes "correct and recalculate without
         // starting over" possible.
@@ -276,6 +318,9 @@ const calculateRun = async (req, res) => {
             halfDayWeight: settings.halfDayWeight,
             overtime: settings.overtime,
             approvalDepth: settings.approvalDepth,
+            // Snapshot the threshold used to flag sharp pay moves, so getRun's
+            // "flagged" count reflects the configured value, not a hard-coded 20.
+            varianceThreshold: settings.variancePercentThreshold,
         };
         run.exceptions = exceptions;
         await run.save();
@@ -299,17 +344,27 @@ const calculateRun = async (req, res) => {
         // orphaning the stored payslip file and destroying the only per-person
         // proof that money left the building. Matched by (personType, personId).
         const priorLines = await PayrollLine.find({ run: run._id })
-            .select("personType personId payment payslip")
+            .select("personType personId payment payslip net")
             .lean();
         const priorByPerson = new Map(
             priorLines.map((l) => [`${l.personType}:${String(l.personId)}`, l])
         );
-        const carriedPayments = priorLines.filter(
-            (l) => l.payment && l.payment.status && l.payment.status !== "pending"
-        ).length;
+        const isDisbursed = (l) => l.payment && l.payment.status && l.payment.status !== "pending";
+        const carriedPayments = priorLines.filter(isDisbursed).length;
+        const computedKeys = new Set(computed.map((c) => `${c.personType}:${String(c.personId)}`));
 
-        await PayrollLine.deleteMany({ run: run._id });
+        // #5: never delete a line that carries disbursement evidence (a payment
+        // not pending) for somebody who is no longer in the run — that would
+        // erase the only proof money left. Keep it as a "paid but now excluded"
+        // record. Everyone else's prior line is rebuilt below.
+        const keepIds = priorLines
+            .filter((l) => isDisbursed(l) && !computedKeys.has(`${l.personType}:${String(l.personId)}`))
+            .map((l) => l._id);
+        await PayrollLine.deleteMany(
+            keepIds.length ? { run: run._id, _id: { $nin: keepIds } } : { run: run._id }
+        );
 
+        const staleFigures = [];
         const docs = computed.map(({ personType, personId, person, profile, policyName, line }) => {
             const previousNet = previousNetById.get(String(personId));
             const variancePercent =
@@ -317,7 +372,8 @@ const calculateRun = async (req, res) => {
                     ? round2(((line.net - previousNet) / previousNet) * 100)
                     : null;
             const prior = priorByPerson.get(`${personType}:${String(personId)}`);
-            return {
+
+            const doc = {
                 run: run._id,
                 month,
                 personType,
@@ -331,11 +387,30 @@ const calculateRun = async (req, res) => {
                 previousNet: previousNet ?? null,
                 variancePercent,
                 ...line,
-                // Carried forward so a reopen+recalc never erases disbursement
-                // evidence or a released payslip (see the priorByPerson note above).
-                ...(prior?.payment ? { payment: prior.payment } : {}),
-                ...(prior?.payslip ? { payslip: prior.payslip } : {}),
             };
+
+            // Carry disbursement evidence across the recalc.
+            if (prior?.payment) doc.payment = prior.payment;
+
+            // #3: if this line was already paid / its payslip released and the
+            // recomputed net no longer matches, the released payslip is stale.
+            // Clear it (so the next release re-renders the correct figure) and
+            // flag the delta — never silently leave a payslip that disagrees with
+            // the line it is supposed to be.
+            if (prior?.payslip?.key) {
+                const paidAmt = prior.payment?.amount;
+                const changed =
+                    (typeof paidAmt === "number" && Math.abs(paidAmt - line.net) > 0.001) ||
+                    (typeof prior.net === "number" && Math.abs(prior.net - line.net) > 0.001);
+                if (changed) {
+                    doc.figureChangedAfterPayment = true;
+                    staleFigures.push({ personType, personId, name: doc.personName, wasPaid: paidAmt ?? prior.net, nowNet: line.net });
+                    // payslip deliberately NOT carried -> re-renders on next release
+                } else {
+                    doc.payslip = prior.payslip;
+                }
+            }
+            return doc;
         });
         if (docs.length > 0) await PayrollLine.insertMany(docs);
 
@@ -352,7 +427,9 @@ const calculateRun = async (req, res) => {
             { people: 0, gross: 0, deductions: 0, adjustments: 0, net: 0, overtimePay: 0 }
         );
         run.totals = totals;
+        run.calculating = false; // release the generation lease on success
         await run.save();
+        leaseHeld = false; // released cleanly by the save above
 
         await audit({
             action: "run.calculated",
@@ -364,13 +441,23 @@ const calculateRun = async (req, res) => {
                 net: totals.net,
                 exceptions: exceptions.length,
                 ...(carriedPayments > 0 ? { carriedPayments } : {}),
+                ...(staleFigures.length > 0 ? { staleFigures: staleFigures.length } : {}),
             },
         });
 
-        return res.json({ run, lineCount: docs.length, exceptions });
+        return res.json({ run, lineCount: docs.length, exceptions, staleFigures });
     } catch (err) {
         console.error("calculateRun error:", err);
         return res.status(500).json({ message: err.message });
+    } finally {
+        // Release ONLY the lease this call acquired (an error after claiming it).
+        // A call that was refused the lease never set leaseHeld, so it cannot
+        // clear the lease the in-progress calculation is holding.
+        if (leaseHeld && leaseRunId) {
+            try {
+                await PayrollRun.updateOne({ _id: leaseRunId }, { $set: { calculating: false } });
+            } catch { /* best effort */ }
+        }
     }
 };
 
@@ -569,14 +656,16 @@ const submitRun = async (req, res) => {
         }
 
         const actor = actorFromReq(req);
-        run.status = "pending-approval";
-        run.submittedAt = new Date();
-        run.submittedBy = actor;
-        if (req.body?.notes) run.notes = String(req.body.notes).trim();
-        await run.save();
+        const updated = await casStatus(run._id, run.status, {
+            status: "pending-approval",
+            submittedAt: new Date(),
+            submittedBy: actor,
+            ...(req.body?.notes ? { notes: String(req.body.notes).trim() } : {}),
+        });
+        if (!updated) return res.status(409).json(STALE_RUN);
 
-        await audit({ action: "run.submitted", run, month, req, detail: { net: run.totals.net } });
-        return res.json(run);
+        await audit({ action: "run.submitted", run: updated, month, req, detail: { net: updated.totals.net } });
+        return res.json(updated);
     } catch (err) {
         console.error("submitRun error:", err.message);
         return res.status(500).json({ message: err.message });
@@ -622,14 +711,16 @@ const approveRun = async (req, res) => {
             }
         }
 
-        run.status = "approved";
-        run.approvedAt = new Date();
-        run.approvedBy = actorFromReq(req);
-        if (req.body?.notes) run.notes = String(req.body.notes).trim();
-        await run.save();
+        const updated = await casStatus(run._id, run.status, {
+            status: "approved",
+            approvedAt: new Date(),
+            approvedBy: actorFromReq(req),
+            ...(req.body?.notes ? { notes: String(req.body.notes).trim() } : {}),
+        });
+        if (!updated) return res.status(409).json(STALE_RUN);
 
-        await audit({ action: "run.approved", run, month, req, detail: { net: run.totals.net } });
-        return res.json(run);
+        await audit({ action: "run.approved", run: updated, month, req, detail: { net: updated.totals.net } });
+        return res.json(updated);
     } catch (err) {
         console.error("approveRun error:", err.message);
         return res.status(500).json({ message: err.message });
@@ -658,14 +749,16 @@ const rejectRun = async (req, res) => {
             });
         }
 
-        run.status = "draft";
-        run.rejectedAt = new Date();
-        run.rejectedBy = actorFromReq(req);
-        run.rejectionReason = reason;
-        await run.save();
+        const updated = await casStatus(run._id, run.status, {
+            status: "draft",
+            rejectedAt: new Date(),
+            rejectedBy: actorFromReq(req),
+            rejectionReason: reason,
+        });
+        if (!updated) return res.status(409).json(STALE_RUN);
 
-        await audit({ action: "run.rejected", run, month, req, reason });
-        return res.json(run);
+        await audit({ action: "run.rejected", run: updated, month, req, reason });
+        return res.json(updated);
     } catch (err) {
         console.error("rejectRun error:", err.message);
         return res.status(500).json({ message: err.message });
@@ -690,13 +783,15 @@ const closeRun = async (req, res) => {
                 runStatus: run.status,
             });
         }
-        run.status = "closed";
-        run.closedAt = new Date();
-        run.closedBy = actorFromReq(req);
-        await run.save();
+        const updated = await casStatus(run._id, run.status, {
+            status: "closed",
+            closedAt: new Date(),
+            closedBy: actorFromReq(req),
+        });
+        if (!updated) return res.status(409).json(STALE_RUN);
 
-        await audit({ action: "run.closed", run, month, req, detail: { net: run.totals.net } });
-        return res.json(run);
+        await audit({ action: "run.closed", run: updated, month, req, detail: { net: updated.totals.net } });
+        return res.json(updated);
     } catch (err) {
         console.error("closeRun error:", err.message);
         return res.status(500).json({ message: err.message });
@@ -721,14 +816,29 @@ const reopenRun = async (req, res) => {
             return res.status(409).json({ message: "This run is already open." });
         }
 
-        run.status = "draft";
-        run.reopenedAt = new Date();
-        run.reopenedBy = actorFromReq(req);
-        run.reopenReason = reason;
-        await run.save();
+        // Reopening a run where money has already gone out is how a double
+        // payment happens: the figures get rebuilt while a disbursed line reads
+        // "pending" again. Refuse unless the caller explicitly forces it.
+        const forced = req.body?.force === true || String(req.body?.force) === "true";
+        const paidCount = await PayrollLine.countDocuments({ run: run._id, "payment.status": "paid" });
+        if (paidCount > 0 && !forced) {
+            return res.status(409).json({
+                message: `${paidCount} ${paidCount === 1 ? "person has" : "people have"} already been paid this month. Reopening a run after money has gone out risks double payment — resend with force:true only if you are certain.`,
+                code: "paidLinesExist",
+                paidCount,
+            });
+        }
 
-        await audit({ action: "run.reopened", run, month, req, reason });
-        return res.json(run);
+        const updated = await casStatus(run._id, run.status, {
+            status: "draft",
+            reopenedAt: new Date(),
+            reopenedBy: actorFromReq(req),
+            reopenReason: reason,
+        });
+        if (!updated) return res.status(409).json(STALE_RUN);
+
+        await audit({ action: "run.reopened", run: updated, month, req, reason: forced ? `${reason} [forced over ${paidCount} paid]` : reason });
+        return res.json(updated);
     } catch (err) {
         console.error("reopenRun error:", err.message);
         return res.status(500).json({ message: err.message });

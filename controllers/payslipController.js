@@ -57,28 +57,75 @@ const nextPayslipNumber = async (month) => {
   line that is approved AND paid, whose figure cannot change without an explicit
   reopen (which resets the payment), so nothing hands out a figure still in flux.
 */
-const releasePayslipForLine = async (line, month, settings) => {
+const releasePayslipForLine = async (line, month, settings, actor = null) => {
     if (line.payslip?.key) return "skipped"; // already has one
 
-    const payslipNumber = line.payslip?.number || (await nextPayslipNumber(month));
-    const buffer = await renderPayslipPdf(line.toObject(), {
-        payslipNumber,
-        note: settings.payslipNote,
-    });
-    const stored = await uploadFile({
-        folder: `payslips/${month}`,
-        originalName: `${payslipNumber}.pdf`,
-        buffer,
-        contentType: "application/pdf",
-    });
-    line.payslip = {
-        number: payslipNumber,
-        key: stored.key,
-        bucket: stored.bucket,
-        generatedAt: new Date(),
-        releasedAt: new Date(),
-    };
-    await line.save();
+    // #7: atomically claim this line's payslip slot before doing any work, so two
+    // concurrent releases cannot both render a PDF and burn a payslip number. The
+    // claim flips generatedAt from unset; only the winner proceeds, the loser
+    // skips. generatedAt is claimed first (before allocating a number) so a lost
+    // race never burns a sequential payslip number.
+    const claimed = await PayrollLine.findOneAndUpdate(
+        { _id: line._id, "payslip.key": { $exists: false }, "payslip.generatedAt": { $exists: false } },
+        { $set: { "payslip.generatedAt": new Date() } },
+        { new: true }
+    );
+    if (!claimed) return "skipped";
+
+    let payslipNumber;
+    try {
+        payslipNumber = claimed.payslip?.number || (await nextPayslipNumber(month));
+        const buffer = await renderPayslipPdf(claimed.toObject(), {
+            payslipNumber,
+            note: settings.payslipNote,
+        });
+        const stored = await uploadFile({
+            folder: `payslips/${month}`,
+            originalName: `${payslipNumber}.pdf`,
+            buffer,
+            contentType: "application/pdf",
+        });
+        await PayrollLine.updateOne(
+            { _id: line._id },
+            { $set: {
+                "payslip.number": payslipNumber,
+                "payslip.key": stored.key,
+                "payslip.bucket": stored.bucket,
+                "payslip.releasedAt": new Date(),
+            } }
+        );
+        // Keep the passed-in doc in sync for callers that read it afterwards.
+        line.payslip = {
+            number: payslipNumber,
+            key: stored.key,
+            bucket: stored.bucket,
+            generatedAt: claimed.payslip.generatedAt,
+            releasedAt: new Date(),
+        };
+    } catch (err) {
+        // Release the claim so a retry can render it, rather than the slot being
+        // stuck "claimed but never rendered".
+        await PayrollLine.updateOne(
+            { _id: line._id, "payslip.key": { $exists: false } },
+            { $unset: { "payslip.generatedAt": "" } }
+        );
+        throw err;
+    }
+
+    // Append-only record of a money-adjacent action, so BOTH the bulk release
+    // and the auto-release-on-paid path leave a trace of who got a payslip, when
+    // and by whom.
+    try {
+        await PayrollAudit.create({
+            action: "payslip.released",
+            run: line.run,
+            month,
+            actor,
+            detail: { person: line.personName, payslipNumber },
+        });
+    } catch (auditErr) {
+        console.error("payslip audit failed:", auditErr.message);
+    }
 
     // Tell them it is there. A push failure must not stop anything.
     try {
@@ -137,7 +184,7 @@ const releasePayslips = async (req, res) => {
                 continue;
             }
             try {
-                await releasePayslipForLine(line, month, settings);
+                await releasePayslipForLine(line, month, settings, actorFromReq(req));
                 produced.push({ person: line.personName, number: line.payslip.number });
             } catch (err) {
                 console.error(`payslip render failed for ${line.personName}:`, err.message);

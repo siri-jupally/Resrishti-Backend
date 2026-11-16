@@ -162,6 +162,10 @@ const computeLine = ({
         overtimeDays: 0,
     };
 
+    // The actual dates behind each count, so a payslip can answer "which days?"
+    // (traceability for LOP / OT / leave). Dates are collected in calendar order.
+    const dates = { leavePaid: [], leaveUnpaid: [], absent: [], unapproved: [], overtime: [] };
+
     for (const day of days) {
         const record = recordByDate.get(day.date);
         const result = classifyDay({
@@ -187,13 +191,16 @@ const computeLine = ({
                         (day.kind === "holiday" && settings.overtime.countHoliday))
                 ) {
                     tally.overtimeDays += result.weight;
+                    dates.overtime.push(day.date);
                 }
                 break;
             case "leavePaid":
                 tally.leavePaid += 1;
+                dates.leavePaid.push(day.date);
                 break;
             case "leaveUnpaid":
                 tally.leaveUnpaid += 1;
+                dates.leaveUnpaid.push(day.date);
                 break;
             case "weeklyOff":
                 tally.weeklyOffs += 1;
@@ -203,9 +210,11 @@ const computeLine = ({
                 break;
             case "unapproved":
                 tally.unapproved += 1;
+                dates.unapproved.push(day.date);
                 break;
             default:
                 tally.absent += 1;
+                dates.absent.push(day.date);
         }
     }
 
@@ -268,6 +277,11 @@ const computeLine = ({
         const notOnPayroll = calendar.length - days.length;
         if (notOnPayroll > 0) lopDays = round2(lopDays + notOnPayroll);
 
+        // A misconfigured calendar (e.g. fixed30 basis against a 31-working-day
+        // month, or an empty weekly-off list) could drive lopDays past the
+        // divisor and the salary negative. Clamp so base pay can never go below 0.
+        lopDays = Math.min(lopDays, divisor);
+
         basePay = round2(rate.amount - perDayRate * lopDays);
         // Paid day-equivalents = the full-month basis minus the days lost. This
         // reconciles with the money (basePay ≈ perDayRate × payableDays). The
@@ -314,6 +328,7 @@ const computeLine = ({
         perDayRate,
         daysOnPayroll: days.length,
         days: tally,
+        dayDates: dates,
         lopDays,
         payableDays,
         basePay,
@@ -321,9 +336,12 @@ const computeLine = ({
         overtimePay,
         gross,
         statutory,
-        deductions: statutory.total,
+        // Statutory comes off take-home, so it can never exceed gross and
+        // net can never be negative, even if a misconfiguration sums the
+        // components past gross. net = gross - deductions stays consistent.
+        deductions: Math.min(statutory.total, gross),
         adjustments: 0,
-        net: round2(gross - statutory.total),
+        net: round2(Math.max(0, gross - statutory.total)),
         exceptions,
     };
 };

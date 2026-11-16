@@ -306,8 +306,24 @@ const recordPayments = async (req, res) => {
                 actor,
                 bank,
             });
+            // Persist atomically, conditioned on the line still existing on this
+            // run. A concurrent recalculation deletes and recreates lines with new
+            // _ids, which would make line.save() a SILENT no-op and lose a recorded
+            // payment. If it is gone, report it rather than dropping it.
             // eslint-disable-next-line no-await-in-loop
-            await line.save();
+            const w = await PayrollLine.updateOne(
+                { _id: line._id, run: run._id },
+                { $set: { payment: line.payment } }
+            );
+            if (!w.matchedCount) {
+                problems.push({
+                    lineId: o.lineId,
+                    name: line.personName,
+                    code: "lineChanged",
+                    message: "This line changed (the run may have been recalculated) — reload and retry.",
+                });
+                continue;
+            }
             applied.push({ lineId: String(line._id), name: line.personName, status: o.status });
 
             // Release this person's payslip the moment they are paid — no waiting
@@ -320,7 +336,7 @@ const recordPayments = async (req, res) => {
                     // never fails the payment that was just recorded.
                     const { releasePayslipForLine } = require("./payslipController");
                     // eslint-disable-next-line no-await-in-loop
-                    await releasePayslipForLine(line, run.month, settings);
+                    await releasePayslipForLine(line, run.month, settings, actor);
                 } catch (slipErr) {
                     console.error(`auto-release payslip failed for ${line.personName}:`, slipErr.message);
                 }
@@ -345,35 +361,45 @@ const recordPayments = async (req, res) => {
         // most of them are. A part-paid month stays approved and visibly
         // unfinished.
         const settled = counts.paidCount === total && total > 0;
+
+        // Persist the rollup and any status flip ATOMICALLY, conditioned on the
+        // run still being in a payable status. If a concurrent (forced) reopen
+        // sent it to draft, this matches nothing and we do NOT stamp a stale
+        // "paid"/"approved" over the freshly reopened run.
+        const set = { payment: counts };
+        const unset = {};
         if (settled && run.status !== "paid") {
-            run.status = "paid";
-            run.paidAt = new Date();
-            run.paidBy = actor;
+            set.status = "paid"; set.paidAt = new Date(); set.paidBy = actor;
         } else if (!settled && run.status === "paid") {
-            // A line that was paid has gone back to failed/pending, so the month
-            // is no longer fully paid — drop it back to approved rather than
-            // leaving a "Paid" month with an unpaid person. (A closed month can't
-            // reach here: recordPayments refuses a closed run.)
-            run.status = "approved";
-            run.paidAt = undefined;
-            run.paidBy = undefined;
+            // A paid line went back to failed/pending — the month is no longer
+            // fully paid, so drop it back to approved rather than leaving a "Paid"
+            // month with an unpaid person.
+            set.status = "approved"; unset.paidAt = ""; unset.paidBy = "";
         }
-        await run.save();
+        const update = Object.keys(unset).length ? { $set: set, $unset: unset } : { $set: set };
+        const freshRun = await PayrollRun.findOneAndUpdate(
+            { _id: run._id, status: { $in: ["approved", "paid"] } },
+            update,
+            { new: true }
+        );
+        // null => the run was reopened/changed concurrently; the per-line writes
+        // above were already guarded. Reflect the real current run.
+        const runNow = freshRun || (await PayrollRun.findById(run._id)) || run;
 
         await audit({
             action: "payment.recorded",
-            run,
+            run: runNow,
             month,
             req,
             detail: { applied: applied.length, paid: counts.paidCount, failed: counts.failedCount },
         });
-        if (settled) {
-            await audit({ action: "run.paid", run, month, req, detail: { paidAmount: counts.paidAmount } });
+        if (settled && freshRun?.status === "paid") {
+            await audit({ action: "run.paid", run: runNow, month, req, detail: { paidAmount: counts.paidAmount } });
         }
 
         return res.json({
             ok: true,
-            run,
+            run: runNow,
             applied,
             problems,
             payment: counts,

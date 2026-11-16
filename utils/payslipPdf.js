@@ -209,6 +209,33 @@ const Identity = ({ line, payslipNumber }) =>
         ),
     );
 
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const fmtDay = (iso) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+    return m ? `${Number(m[3])} ${MONTHS_SHORT[Number(m[2]) - 1]}` : (iso || "");
+};
+
+/* The actual dates behind the LOP / OT / leave counts, so a disputed figure
+   ("why 5 LOP — which days?") is answered on the payslip itself. */
+const DayDatesBlock = (line) => {
+    const dd = line.dayDates || {};
+    const groups = [
+        ["Absent", dd.absent],
+        ["Unpaid leave", dd.leaveUnpaid],
+        ["Unapproved (worked, not decided)", dd.unapproved],
+        ["Overtime", dd.overtime],
+        ["Paid leave", dd.leavePaid],
+    ].filter(([, arr]) => Array.isArray(arr) && arr.length > 0);
+    if (groups.length === 0) return null;
+    return e(View, { style: { marginTop: 6 } },
+        ...groups.map(([label, arr], i) =>
+            e(Text, { key: i, style: { fontSize: 8, color: "#3f3f46", marginTop: 2 } },
+                `${label} (${arr.length}): ${arr.map(fmtDay).join(", ")}`
+            )
+        )
+    );
+};
+
 /* The day counts that matter for this pay model. A daily-wage worker has no
    use for a "weekly-offs" figure they were never paid for. */
 const DayCounts = ({ line }) => {
@@ -246,6 +273,7 @@ const DayCounts = ({ line }) => {
                 )
             )
         ),
+        DayDatesBlock(line),
     );
 };
 

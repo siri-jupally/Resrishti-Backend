@@ -651,7 +651,8 @@ describe("recalculating a reopened paid run preserves payment + payslip records"
         // An admin reopens the month with a reason, then it is recalculated.
         const reopenRes = mockRes();
         await runs.reopenRun(
-            asAdmin({ params: { month: MONTH }, body: { reason: "Correcting an allowance" } }),
+            // force: a disbursed run now needs explicit override to reopen (double-pay guard).
+            asAdmin({ params: { month: MONTH }, body: { reason: "Correcting an allowance", force: true } }),
             reopenRes
         );
         expect(reopenRes.statusCode).toBe(200);
@@ -676,6 +677,46 @@ describe("recalculating a reopened paid run preserves payment + payslip records"
             .sort({ createdAt: -1 })
             .lean();
         expect(calc.detail.carriedPayments).toBe(1);
+    });
+});
+
+// ─────────── concurrency / disbursement guards ───────────
+
+describe("concurrency and disbursement guards", () => {
+    test("reopening a run with paid lines is refused without force, allowed with it", async () => {
+        await tagForPayroll();
+        await markFullMonth();
+        await closeAttendanceMonth();
+        await calculate();
+        await PayrollLine.updateOne(
+            { month: MONTH, personType: "Employee", personId: employee._id },
+            { $set: { "payment.status": "paid", "payment.amount": 1000, "payment.reference": "UTR-X" } }
+        );
+        await PayrollRun.updateOne({ month: MONTH }, { $set: { status: "paid" } });
+
+        const noForce = mockRes();
+        await runs.reopenRun(asAdmin({ params: { month: MONTH }, body: { reason: "Fixing an allowance" } }), noForce);
+        expect(noForce.statusCode).toBe(409);
+        expect(noForce.body.code).toBe("paidLinesExist");
+
+        const forced = mockRes();
+        await runs.reopenRun(asAdmin({ params: { month: MONTH }, body: { reason: "Fixing an allowance", force: true } }), forced);
+        expect(forced.statusCode).toBe(200);
+        expect(forced.body.status).toBe("draft");
+    });
+
+    test("a second generate is refused while one holds the lease", async () => {
+        await tagForPayroll();
+        await markFullMonth();
+        await closeAttendanceMonth();
+        await calculate(); // creates the draft run; its lease is released
+
+        // Simulate an in-flight generation still holding the lease.
+        await PayrollRun.updateOne({ month: MONTH }, { $set: { calculating: true } });
+
+        const res = await calculate();
+        expect(res.statusCode).toBe(409);
+        expect(res.body.code).toBe("calculating");
     });
 });
 

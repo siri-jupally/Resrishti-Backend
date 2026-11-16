@@ -51,6 +51,16 @@ const payrollLineSchema = new mongoose.Schema(
             overtimeDays: Number,
             _id: false,
         },
+        // The actual YYYY-MM-DD dates behind each count, so a payslip can answer
+        // "which days?" for a disputed LOP / overtime / leave figure.
+        dayDates: {
+            leavePaid: [String],
+            leaveUnpaid: [String],
+            absent: [String],
+            unapproved: [String],
+            overtime: [String],
+            _id: false,
+        },
         lopDays: Number,
         payableDays: Number,
 
@@ -71,6 +81,13 @@ const payrollLineSchema = new mongoose.Schema(
         },
         adjustments: { type: Number, default: 0 },
         net: Number,
+
+        // Set when a reopen+recalc changed this line's net AFTER it was already
+        // paid / its payslip released, so the released figure no longer matches.
+        // The stale payslip is cleared (re-rendered on next release) and this
+        // flags the delta for review rather than silently handing out a figure
+        // that changed under the person's feet.
+        figureChangedAfterPayment: { type: Boolean, default: false },
 
         // Manual changes made during review. Capped and categorised rather than
         // free-form, so "other" cannot become a habit.

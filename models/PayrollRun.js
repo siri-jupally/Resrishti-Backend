@@ -72,6 +72,11 @@ const payrollRunSchema = new mongoose.Schema(
             default: "draft",
         },
 
+        // Exclusive generation lease. Set while a calculation is rebuilding this
+        // month's lines so two concurrent "Generate" presses cannot interleave
+        // the delete-and-rebuild into duplicate-key errors or a half-built set.
+        calculating: { type: Boolean, default: false },
+
         // What the figures were worked out from. Kept on the run so a
         // recalculation months later can be compared against what was actually
         // paid, even if the settings have changed since.
@@ -80,6 +85,7 @@ const payrollRunSchema = new mongoose.Schema(
             halfDayWeight: Number,
             overtime: mongoose.Schema.Types.Mixed,
             approvalDepth: String,
+            varianceThreshold: Number,
             _id: false,
         },
 
