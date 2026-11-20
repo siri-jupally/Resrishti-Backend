@@ -90,15 +90,29 @@ const deleteTestimonial = async (req, res) => {
     }
 };
 
-// @desc    Create initial admin (Seeding)
+// @desc    Create the FIRST admin (one-time bootstrap only)
 // @route   POST /api/admin/seed
-// @access  Public (Should be protected or removed in production)
+// @access  Public, but self-closing: once any admin exists this route is dead.
+//
+// This used to create an admin for any new email, with no auth — a
+// privilege-escalation hole, since anyone who could reach it could mint
+// themselves a full admin account. It is now a bootstrap primitive: it works
+// exactly once, to create the very first admin on a fresh install, and 403s
+// forever after. New admins are created by promoting a manager (see
+// adminOrgController.promoteManagerToAdmin), which requires an admin token.
 const seedAdmin = async (req, res) => {
     try {
         const { email, password } = req.body;
-        const adminExists = await Admin.findOne({ email });
-        if (adminExists) {
-            return res.status(400).json({ message: 'Admin already exists' });
+        // Self-closing gate: the moment one admin exists, bootstrap is over.
+        const anyAdmin = await Admin.findOne().select("_id").lean();
+        if (anyAdmin) {
+            return res.status(403).json({
+                message:
+                    "An admin already exists. This bootstrap route is closed; create further admins by promoting a manager from the Staff screen.",
+            });
+        }
+        if (!email || !password) {
+            return res.status(400).json({ message: "email and password are required" });
         }
         const admin = await Admin.create({ email, password });
         res.status(201).json({

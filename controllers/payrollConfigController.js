@@ -362,7 +362,7 @@ const CANDIDATE_LIMIT = 25;
 const listAccountantCandidates = async (req, res) => {
     try {
         const q = String(req.query?.q || "").trim();
-        const filter = { canPreparePayroll: { $ne: true } };
+        const filter = { canPreparePayroll: { $ne: true }, isTestAccount: { $ne: true } };
         if (q) {
             // Escaped: a search box is not a place to accept a regex.
             const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

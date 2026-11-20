@@ -24,6 +24,7 @@
 const Manager = require("../models/Manager");
 const Employee = require("../models/Employee");
 const Task = require("../models/Task");
+const { nextStaffNo } = require("../utils/staffCode");
 const jwt = require("jsonwebtoken");
 
 const { sendEmail } = require("../utils/emailService");
@@ -64,6 +65,13 @@ const loginManager = async (req, res) => {
   try {
     const manager = await Manager.findOne({ email });
     if (manager && (await manager.comparePassword(password))) {
+      // Archived = left or promoted away. Kept for history, no login. Checked
+      // only after a correct password so it never leaks which accounts exist.
+      if (manager.archived) {
+        return res.status(403).json({
+          message: "This account has been deactivated. Contact your administrator.",
+        });
+      }
       return res.json({
         _id: manager._id,
         email: manager.email,
@@ -86,10 +94,18 @@ const createEmployee = async (req, res) => {
     const exists = await Employee.findOne({ email });
     if (exists)
       return res.status(400).json({ message: "Employee already exists" });
+    // Reserve the next staff code — unless this is a test account, which gets no
+    // code and no biometric enrolment. The number is also the biometric device
+    // User ID, so it comes from the shared sequence (unique across Employees +
+    // Managers). See utils/staffCode.js.
+    const isTest = req.body.isTestAccount === true;
+    const empNo = isTest ? undefined : await nextStaffNo();
     const employee = await Employee.create({
       name,
       email,
       password,
+      empNo,
+      isTestAccount: isTest,
       manager: req.manager._id,
       jobRole: jobRole || undefined,
       department: department || undefined,
@@ -98,7 +114,7 @@ const createEmployee = async (req, res) => {
     });
     res
       .status(201)
-      .json({ _id: employee._id, email: employee.email, name: employee.name, jobRole: employee.jobRole, department: employee.department, joiningDate: employee.joiningDate, canSupervise: employee.canSupervise });
+      .json({ _id: employee._id, empNo: employee.empNo, email: employee.email, name: employee.name, jobRole: employee.jobRole, department: employee.department, joiningDate: employee.joiningDate, canSupervise: employee.canSupervise });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

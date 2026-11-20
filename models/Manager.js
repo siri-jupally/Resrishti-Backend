@@ -22,6 +22,24 @@ const bcrypt = require("bcryptjs");
 const managerSchema = new mongoose.Schema(
   {
     name: { type: String },
+    // Human-readable staff code, e.g. 7 -> shown as "RES-0007". Same field as on
+    // Employee: the number is immutable, doubles as the biometric device User ID,
+    // and is unique across Employees AND Managers via one shared sequence
+    // (models/Counter.js, utils/staffCode.js). Backfilled by scripts/backfillEmpNo.js.
+    empNo: { type: Number, unique: true, sparse: true, index: true },
+    // See Employee.js — test accounts are excluded from staff-code assignment.
+    isTestAccount: { type: Boolean, default: false },
+    // Soft-delete for staff who have left (see Employee.js).
+    archived: { type: Boolean, default: false },
+    archivedAt: { type: Date },
+    archivedByName: { type: String, trim: true },
+    // See Employee.js. For a manager, "promoted" means promoted to Admin.
+    archivedReason: { type: String, enum: ["left", "promoted", ""], default: "" },
+    promotedToAdmin: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+    // Set when this manager was itself created by promoting an employee, so the
+    // person's history on the old Employee record can be traced from here.
+    promotedFromEmployee: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
+    promotedAt: { type: Date },
     email: {
       type: String,
       required: true,
@@ -50,6 +68,18 @@ const managerSchema = new mongoose.Schema(
     idProofType: { type: String, enum: ["aadhaar", "pan", "passport", ""] },
     idProofNumber: { type: String },
     idProofDocument: { type: String },
+
+    // KYC documents collected by the accountant/admin. See Employee.js.
+    kycDocuments: [
+        {
+            kind: { type: String, enum: ["aadhaar", "pan", "other"], default: "other" },
+            label: { type: String, trim: true },
+            number: { type: String, trim: true },
+            file: { type: String },
+            uploadedAt: { type: Date, default: Date.now },
+            uploadedByName: { type: String, trim: true },
+        },
+    ],
 
     /*
       Bank account for salary. The person's own, not payroll's.

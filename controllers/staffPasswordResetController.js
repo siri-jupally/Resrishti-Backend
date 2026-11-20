@@ -139,7 +139,10 @@ const forgotPassword = (roleKey) => async (req, res) => {
         // Unknown address: answer exactly as if it had worked, and send nothing.
         // Returning early here (rather than after a fake delay) is fine because
         // the rate limiter, not response timing, is what bounds probing.
-        if (!user) return res.json(SENT_OK);
+        // An archived account (left, or promoted into another role) is treated
+        // the same way — a reset must not resurrect a login we deactivated.
+        // (Admin has no `archived` field, so this never fires for admins.)
+        if (!user || user.archived) return res.json(SENT_OK);
 
         // Only the newest link may ever work.
         await PasswordResetToken.updateMany(

@@ -1,9 +1,15 @@
 const Manager = require("../models/Manager");
 const Employee = require("../models/Employee");
+const { nextStaffNo } = require("../utils/staffCode");
 const Leave = require("../models/Leave");
 const ManagerLeave = require("../models/ManagerLeave");
 const Attendance = require("../models/Attendance");
 const Admin = require("../models/Admin");
+const CorrectionRequest = require("../models/CorrectionRequest");
+const LocationTrail = require("../models/LocationTrail");
+const Task = require("../models/Task");
+const PayrollProfile = require("../models/PayrollProfile");
+const PayrollLine = require("../models/PayrollLine");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { applyJobRole } = require("./workAccessController");
 const { lockBlocksRange } = require("../utils/attendanceLock");
@@ -23,8 +29,13 @@ const createManager = async (req, res) => {
             return res.status(400).json({ message: "Manager with this email already exists" });
         }
 
+        // Reserve the next staff code from the shared sequence (unique across
+        // Employees + Managers; also the biometric device User ID) — unless this
+        // is a test account, which gets no code. See utils/staffCode.js.
+        const isTest = req.body.isTestAccount === true;
+        const empNo = isTest ? undefined : await nextStaffNo();
         const manager = new Manager({
-            name, email, password,
+            name, email, password, empNo, isTestAccount: isTest,
             jobRole: jobRole || undefined,
             department: department || undefined,
             joiningDate: joiningDate || undefined,
@@ -37,6 +48,7 @@ const createManager = async (req, res) => {
         await manager.save();
         res.status(201).json({
             _id: manager._id,
+            empNo: manager.empNo,
             name: manager.name,
             email: manager.email,
             role: manager.role,
@@ -438,6 +450,291 @@ const updateMyPickupAgentFlag = async (req, res) => {
     }
 };
 
+// ==================== STAFF LIFECYCLE (archive / hard delete) ====================
+
+async function adminActorName(req) {
+    const a = await Admin.findById(req.admin._id).select("name email").lean();
+    return a?.name || a?.email || "Admin";
+}
+
+function archivePatch(archived, actorName) {
+    return archived
+        ? { archived: true, archivedAt: new Date(), archivedByName: actorName }
+        : { archived: false, archivedAt: null, archivedByName: null };
+}
+
+// PATCH /api/admin/employees/:id/archive   body { archived: true|false }
+// Soft delete: keeps all history, drops them out of active lists and new
+// payroll runs. Reversible.
+const archiveEmployee = async (req, res) => {
+    try {
+        const archived = req.body.archived !== false; // default true
+        const update = archivePatch(archived, archived ? await adminActorName(req) : null);
+        const employee = await Employee.findByIdAndUpdate(req.params.id, { $set: update }, { new: true }).select("-password");
+        if (!employee) return res.status(404).json({ message: "Employee not found" });
+        res.json({ message: archived ? "Employee archived" : "Employee restored", employee });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// PATCH /api/admin/managers/:id/archive   body { archived: true|false }
+const archiveManager = async (req, res) => {
+    try {
+        const archived = req.body.archived !== false;
+        const update = archivePatch(archived, archived ? await adminActorName(req) : null);
+        const manager = await Manager.findByIdAndUpdate(req.params.id, { $set: update }, { new: true }).select("-password");
+        if (!manager) return res.status(404).json({ message: "Manager not found" });
+        res.json({ message: archived ? "Manager archived" : "Manager restored", manager });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// DELETE /api/admin/employees/:id
+// Hard delete with cleanup. Refuses if the person has any payroll history —
+// erasing someone who has been in a run would destroy a financial record, so
+// archive them instead. Otherwise removes the person AND everything that
+// references them, leaving no orphans.
+const deleteEmployeeHard = async (req, res) => {
+    try {
+        const id = req.params.id;
+        const employee = await Employee.findById(id);
+        if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+        const payrollLines = await PayrollLine.countDocuments({ personType: "Employee", personId: id });
+        if (payrollLines > 0) {
+            return res.status(409).json({
+                code: "hasPayrollHistory",
+                message: "This person has payroll history. Archive them instead of deleting, to keep the financial record intact.",
+            });
+        }
+
+        const [att, lv, corr, loc, tsk] = await Promise.all([
+            Attendance.deleteMany({ employee: id }),
+            Leave.deleteMany({ employee: id }),
+            CorrectionRequest.deleteMany({ employee: id }),
+            LocationTrail.deleteMany({ employee: id }),
+            Task.deleteMany({ employee: id }),
+        ]);
+        await Task.updateMany({ collaborators: id }, { $pull: { collaborators: id } });
+        await PayrollProfile.deleteOne({ personType: "Employee", personId: id });
+        await employee.deleteOne();
+
+        res.json({
+            message: "Employee and their records permanently deleted",
+            removed: {
+                attendance: att.deletedCount,
+                leaves: lv.deletedCount,
+                corrections: corr.deletedCount,
+                locationTrails: loc.deletedCount,
+                tasks: tsk.deletedCount,
+            },
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+/*
+  ============================ ROLE PROMOTION ============================
+
+  Admin, Manager and Employee are three SEPARATE collections, not one record
+  with a role flag — so promoting someone is not a toggle. We copy the person
+  into the target collection, carrying their identity, profile, bank, and their
+  immutable RES staff code (empNo), then archive the original. History is NOT
+  migrated across collections (that would risk corrupting payroll's financial
+  record) — it stays intact on the archived original and is linked from the new
+  record. Because empNo carries and the archived original is skipped by every
+  active-only query (biometric resolvePerson included), the staff code keeps
+  resolving to the same person in their new role.
+
+  The one trap: all three models hash the password in a pre-save hook. Copying
+  the already-hashed string into a new record would double-hash it and lock the
+  person out. carryPassword() saves once with a throwaway password (so schema
+  defaults/validation still run) then overwrites the stored hash directly.
+*/
+
+// Fields every staff person carries between collections. Employee and Manager
+// share these names exactly; Admin takes only the few it has.
+const CARRIED_PERSON_FIELDS = [
+    "name", "email", "empNo", "isTestAccount",
+    "isFirstLogin", "isProfileComplete", "hasReviewed",
+    "profilePhoto", "dateOfBirth", "gender", "phone", "personalEmail",
+    "emergencyContactName", "emergencyContactPhone", "currentAddress",
+    "idProofType", "idProofNumber", "idProofDocument",
+    "jobRole", "jobRoleId", "department", "joiningDate",
+    "canSupervise", "canCoordinate", "canPreparePayroll",
+    "bank", "bankUpdatedAt", "bankHistory",
+];
+
+function pickCarried(src, keys = CARRIED_PERSON_FIELDS) {
+    const out = {};
+    for (const k of keys) if (src[k] !== undefined && src[k] !== null) out[k] = src[k];
+    return out;
+}
+
+// Put an already-hashed password onto a freshly-saved record without the
+// model's pre-save hook re-hashing it. The new record keeps the person's
+// existing password, so they sign in with the same credentials.
+async function carryPassword(Model, id, originalHash, originalChangedAt) {
+    await Model.collection.updateOne(
+        { _id: id },
+        { $set: { password: originalHash, passwordChangedAt: originalChangedAt || new Date(Date.now() - 1000) } }
+    );
+}
+
+// Copy the person's ACTIVE payroll setup (the salary/rate config, not the
+// historical payslip lines) into their new role, so a promotion never silently
+// drops them off payroll. Best-effort: no profile, nothing to carry.
+async function carryPayrollProfile(fromType, fromId, toType, toId) {
+    const src = await PayrollProfile.findOne({ personType: fromType, personId: fromId }).lean();
+    if (!src) return false;
+    // Don't duplicate if the target somehow already has one.
+    const exists = await PayrollProfile.findOne({ personType: toType, personId: toId }).select("_id").lean();
+    if (exists) return false;
+    await PayrollProfile.create({
+        personType: toType,
+        personId: toId,
+        employmentType: src.employmentType,
+        payModel: src.payModel,
+        rates: src.rates,
+        paidDayPolicy: src.paidDayPolicy,
+        overtimeOverride: src.overtimeOverride,
+        isActive: src.isActive !== false,
+    });
+    // Retire the old profile so it can't be picked up again (the old record is
+    // archived anyway, but this keeps the data honest).
+    await PayrollProfile.updateOne({ personType: fromType, personId: fromId }, { $set: { isActive: false } });
+    return true;
+}
+
+// POST /api/admin/employees/:id/promote-to-manager
+// Promote an employee into a manager. They keep their login, RES code and
+// profile; their old employee record is archived (history preserved). They
+// start with no team — assign employees to them afterwards as usual.
+const promoteEmployeeToManager = async (req, res) => {
+    try {
+        const id = req.params.id;
+        const employee = await Employee.findById(id);
+        if (!employee) return res.status(404).json({ message: "Employee not found" });
+        if (employee.archived) {
+            return res.status(409).json({ code: "archived", message: "This employee is archived. Restore them before promoting." });
+        }
+        // Email lives in both collections per portal, but a live manager with
+        // this email already would mean two active logins — refuse.
+        const clash = await Manager.findOne({ email: employee.email, archived: { $ne: true } }).select("_id").lean();
+        if (clash) {
+            return res.status(409).json({ code: "managerExists", message: "A manager with this email already exists." });
+        }
+
+        const actorName = await adminActorName(req);
+        const carried = pickCarried(employee);
+
+        // 1. Create the manager with a throwaway password (schema defaults run),
+        //    then carry the real hash so the password is unchanged.
+        const manager = new Manager({
+            ...carried,
+            password: `pending-${require("crypto").randomBytes(12).toString("hex")}`,
+            promotedFromEmployee: employee._id,
+            promotedAt: new Date(),
+        });
+        await manager.save();
+        try {
+            await carryPassword(Manager, manager._id, employee.password, employee.passwordChangedAt);
+            await carryPayrollProfile("Employee", employee._id, "Manager", manager._id);
+
+            // 2. Archive the original employee record — history kept, login closed.
+            employee.archived = true;
+            employee.archivedAt = new Date();
+            employee.archivedByName = actorName;
+            employee.archivedReason = "promoted";
+            employee.promotedToManager = manager._id;
+            await employee.save();
+        } catch (inner) {
+            // Roll back the half-made manager so we never leave two live logins.
+            await Manager.deleteOne({ _id: manager._id });
+            await PayrollProfile.deleteOne({ personType: "Manager", personId: manager._id });
+            throw inner;
+        }
+
+        const out = manager.toObject();
+        delete out.password;
+        res.status(201).json({
+            message: `${employee.name || employee.email} promoted to Manager. They sign in through the manager portal with the same password.`,
+            manager: out,
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// POST /api/admin/managers/:id/promote-to-admin
+// Promote a manager into an admin. Blocked while they still have a team —
+// their reports would be orphaned, so reassign those first. The manager's
+// staff code and attendance history stay on the archived manager record
+// (admins are not in the attendance/biometric flow).
+const promoteManagerToAdmin = async (req, res) => {
+    try {
+        const id = req.params.id;
+        const manager = await Manager.findById(id);
+        if (!manager) return res.status(404).json({ message: "Manager not found" });
+        if (manager.archived) {
+            return res.status(409).json({ code: "archived", message: "This manager is archived. Restore them before promoting." });
+        }
+
+        // Can't orphan a team.
+        const reports = await Employee.find({ manager: id, archived: { $ne: true } }).select("name email").lean();
+        if (reports.length > 0) {
+            return res.status(409).json({
+                code: "hasActiveReports",
+                message: `${manager.name || manager.email} still manages ${reports.length} ${reports.length === 1 ? "person" : "people"}. Reassign them to another manager before promoting to admin.`,
+                reports,
+            });
+        }
+
+        const clash = await Admin.findOne({ email: manager.email }).select("_id").lean();
+        if (clash) {
+            return res.status(409).json({ code: "adminExists", message: "An admin with this email already exists." });
+        }
+
+        const actorName = await adminActorName(req);
+
+        const admin = new Admin({
+            name: manager.name,
+            email: manager.email,
+            password: `pending-${require("crypto").randomBytes(12).toString("hex")}`,
+            canSupervise: Boolean(manager.canSupervise),
+            canCoordinate: manager.canCoordinate !== false,
+            promotedFromManager: manager._id,
+            promotedAt: new Date(),
+        });
+        await admin.save();
+        try {
+            await carryPassword(Admin, admin._id, manager.password, manager.passwordChangedAt);
+
+            manager.archived = true;
+            manager.archivedAt = new Date();
+            manager.archivedByName = actorName;
+            manager.archivedReason = "promoted";
+            manager.promotedToAdmin = admin._id;
+            await manager.save();
+        } catch (inner) {
+            await Admin.deleteOne({ _id: admin._id });
+            throw inner;
+        }
+
+        const out = admin.toObject();
+        delete out.password;
+        res.status(201).json({
+            message: `${manager.name || manager.email} promoted to Admin. They sign in through the admin portal with the same password.`,
+            admin: out,
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     createManager,
     listManagers,
@@ -446,6 +743,11 @@ module.exports = {
     listAllEmployees,
     reassignEmployee,
     updateEmployeePermissions,
+    archiveEmployee,
+    archiveManager,
+    deleteEmployeeHard,
+    promoteEmployeeToManager,
+    promoteManagerToAdmin,
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,

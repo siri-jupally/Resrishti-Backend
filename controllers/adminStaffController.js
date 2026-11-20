@@ -27,7 +27,8 @@ const PayrollProfile = require("../models/PayrollProfile");
 
 const STAFF_FIELDS =
     "name email phone jobRole department joiningDate profilePhoto " +
-    "isFirstLogin isProfileComplete bank bankUpdatedAt " +
+    "isFirstLogin isProfileComplete bank bankUpdatedAt empNo isTestAccount " +
+    "archived archivedAt archivedByName " +
     "canSupervise canCoordinate canPreparePayroll createdAt";
 
 /* The job tags somebody carries, as words rather than booleans. */
@@ -109,6 +110,10 @@ const listStaff = async (req, res) => {
                 payModel: profile?.payModel || null,
                 currentRate: latestRate?.amount ?? null,
                 createdAt: person.createdAt || null,
+                empNo: person.empNo ?? null,
+                isTestAccount: Boolean(person.isTestAccount),
+                archived: Boolean(person.archived),
+                archivedByName: person.archivedByName || null,
             };
         };
 
@@ -121,8 +126,19 @@ const listStaff = async (req, res) => {
         const role = String(req.query.role || "");
         const department = String(req.query.department || "");
         const missing = String(req.query.missing || "");
+        const status = String(req.query.status || "active"); // active | archived | all
 
-        const items = all.filter((r) => {
+        // Headline counts describe ACTIVE staff — archived people have left, so
+        // they don't inflate the organisation's figures.
+        const active = all.filter((r) => !r.archived);
+        // Which pool the list shows before the other filters are applied.
+        const base = status === "archived"
+            ? all.filter((r) => r.archived)
+            : status === "all"
+                ? all
+                : active;
+
+        const items = base.filter((r) => {
             if (role && r.role !== role) return false;
             if (department && r.department !== department) return false;
             // The three gaps an admin actually chases.
@@ -152,16 +168,17 @@ const listStaff = async (req, res) => {
             // Counted over everybody, not over the filtered view: these are the
             // headline figures, and they should not move when you search.
             counts: {
-                people: all.length,
-                managers: all.filter((r) => r.role === "Manager").length,
-                employees: all.filter((r) => r.role === "Employee").length,
-                accountants: all.filter((r) => r.canPreparePayroll).length,
-                onPayroll: all.filter((r) => r.onPayroll).length,
-                offPayroll: all.filter((r) => !r.onPayroll).length,
-                missingBank: all.filter((r) => !r.hasBankDetails).length,
-                incompleteProfile: all.filter((r) => !r.isProfileComplete).length,
-                neverLoggedIn: all.filter((r) => !r.hasLoggedIn).length,
-                unassigned: all.filter((r) => r.role === "Employee" && !r.reportsTo).length,
+                people: active.length,
+                managers: active.filter((r) => r.role === "Manager").length,
+                employees: active.filter((r) => r.role === "Employee").length,
+                accountants: active.filter((r) => r.canPreparePayroll).length,
+                onPayroll: active.filter((r) => r.onPayroll).length,
+                offPayroll: active.filter((r) => !r.onPayroll).length,
+                missingBank: active.filter((r) => !r.hasBankDetails).length,
+                incompleteProfile: active.filter((r) => !r.isProfileComplete).length,
+                neverLoggedIn: active.filter((r) => !r.hasLoggedIn).length,
+                unassigned: active.filter((r) => r.role === "Employee" && !r.reportsTo).length,
+                archived: all.filter((r) => r.archived).length,
             },
             departments: [...new Set(all.map((r) => r.department).filter(Boolean))].sort(),
         });
