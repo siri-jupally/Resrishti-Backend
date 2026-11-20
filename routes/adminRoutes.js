@@ -46,6 +46,13 @@ const {
     reviewLeave: reviewManagerLeave,
 } = require('../controllers/adminManagerAttendanceController');
 const {
+    getEmployeesAttendance,
+    getEmployeesSummary,
+    getEmployeeCalendar,
+    getCorrectionRequests: getEmployeeCorrections,
+    reviewCorrection: reviewEmployeeCorrection,
+} = require('../controllers/adminEmployeeAttendanceController');
+const {
     getEmployeeProfileByAdmin,
     updateEmployeeProfileByAdmin,
     getManagerProfileByAdmin,
@@ -171,6 +178,14 @@ router.get('/org/chart', protect, getOrgChart);
 router.get('/pending-approvals', protect, getPendingApprovals);
 
 // Manager attendance oversight
+// Admin oversight of ALL employees' attendance (day view across the company,
+// grouped by manager). Approve reuses PATCH /attendance/:id/approve.
+router.get('/employee-attendance/team', protect, getEmployeesAttendance);
+router.get('/employee-attendance/team/summary', protect, getEmployeesSummary);
+router.get('/employee-attendance/employee/:employeeId/calendar', protect, getEmployeeCalendar);
+router.get('/employee-attendance/corrections', protect, getEmployeeCorrections);
+router.patch('/employee-attendance/corrections/:id', protect, reviewEmployeeCorrection);
+
 router.get('/manager-attendance/team', protect, getManagersAttendance);
 router.get('/manager-attendance/team/summary', protect, getManagersSummary);
 router.get('/manager-attendance/manager/:managerId/calendar', protect, getManagerCalendar);
