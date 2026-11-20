@@ -165,14 +165,26 @@ const listProfiles = async (req, res) => {
 // The workforce composition, which nothing recorded before payroll existed.
 const summary = async (req, res) => {
     try {
+        // Active people only — an archived or test person's leftover payroll
+        // profile must not inflate "on payroll" or the workforce counts.
+        const activeFilter = { isTestAccount: { $ne: true }, archived: { $ne: true } };
         const [profiles, employees, managers] = await Promise.all([
             PayrollProfile.find({}).lean(),
-            Employee.find({}).select("bank").lean(),
-            Manager.find({}).select("bank").lean(),
+            Employee.find(activeFilter).select("bank").lean(),
+            Manager.find(activeFilter).select("bank").lean(),
         ]);
 
+        // Keep only the profiles that belong to an active person.
+        const activeKeys = new Set([
+            ...employees.map((e) => `Employee:${String(e._id)}`),
+            ...managers.map((m) => `Manager:${String(m._id)}`),
+        ]);
+        const activeProfiles = profiles.filter((p) =>
+            activeKeys.has(`${p.personType}:${String(p.personId)}`)
+        );
+
         const tally = (key) =>
-            profiles.reduce((acc, p) => {
+            activeProfiles.reduce((acc, p) => {
                 const value = p[key] || "unset";
                 acc[value] = (acc[value] || 0) + 1;
                 return acc;
@@ -190,21 +202,21 @@ const summary = async (req, res) => {
             ...employees.map((e) => [`Employee:${String(e._id)}`, e.bank]),
             ...managers.map((m) => [`Manager:${String(m._id)}`, m.bank]),
         ]);
-        const onPayroll = profiles.filter((p) => p.isActive !== false);
+        const onPayroll = activeProfiles.filter((p) => p.isActive !== false);
         const withBank = onPayroll.filter(
             (p) => bankByPerson.get(`${p.personType}:${String(p.personId)}`)?.accountNumber
         ).length;
 
         return res.json({
             people,
-            tagged: profiles.length,
-            untagged: people - profiles.length,
+            tagged: activeProfiles.length,
+            untagged: people - activeProfiles.length,
             byEmploymentType: tally("employmentType"),
             byPayModel: tally("payModel"),
             active: onPayroll.length,
             withBankDetails: withBank,
             missingBankDetails: onPayroll.length - withBank,
-            overtimeEligible: profiles.filter((p) => p.overtimeEligible === true).length,
+            overtimeEligible: activeProfiles.filter((p) => p.overtimeEligible === true).length,
         });
     } catch (err) {
         console.error("payroll summary error:", err.message);
