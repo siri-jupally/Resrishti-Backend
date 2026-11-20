@@ -123,7 +123,7 @@ const createEmployee = async (req, res) => {
 // GET /api/manager/employees
 const listEmployees = async (req, res) => {
   try {
-    const employees = await Employee.find({ manager: req.manager._id }).select(
+    const employees = await Employee.find({ manager: req.manager._id, archived: { $ne: true }, isTestAccount: { $ne: true } }).select(
       "-password"
     );
     res.json(employees);

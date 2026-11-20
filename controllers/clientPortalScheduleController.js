@@ -82,7 +82,7 @@ const createSchedule = async (req, res) => {
             const { sendPush } = require("../utils/push");
             const [admins, managers] = await Promise.all([
                 Admin.find({ canCoordinate: true, pushSubscription: { $exists: true, $ne: null } }).select("pushSubscription").lean(),
-                Manager.find({ canCoordinate: true, pushSubscription: { $exists: true, $ne: null } }).select("pushSubscription").lean(),
+                Manager.find({ canCoordinate: true, archived: { $ne: true }, isTestAccount: { $ne: true }, pushSubscription: { $exists: true, $ne: null } }).select("pushSubscription").lean(),
             ]);
             const payload = {
                 title: "New recurring request",

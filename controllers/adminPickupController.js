@@ -1040,13 +1040,13 @@ const getSupervisorPool = async (req, res) => {
     }
     try {
         const [admins, managers, employees] = await Promise.all([
-            Admin.find({ canSupervise: true })
+            Admin.find({ canSupervise: true, archived: { $ne: true }, isTestAccount: { $ne: true } })
                 .select("_id name email phone")
                 .lean(),
-            Manager.find({ canSupervise: true })
+            Manager.find({ canSupervise: true, archived: { $ne: true }, isTestAccount: { $ne: true } })
                 .select("_id name email phone")
                 .lean(),
-            Employee.find({ canSupervise: true })
+            Employee.find({ canSupervise: true, archived: { $ne: true }, isTestAccount: { $ne: true } })
                 .select("_id name email phone")
                 .lean(),
         ]);

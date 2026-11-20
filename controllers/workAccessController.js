@@ -267,8 +267,8 @@ const deleteJobRole = async (req, res) => {
         // Deleting a held role would silently widen those people to "every mode"
         // (unassigned). Make the admin choose: reassign, or retire instead.
         const [emps, mgrs] = await Promise.all([
-            Employee.countDocuments({ jobRoleId: role._id }),
-            Manager.countDocuments({ jobRoleId: role._id }),
+            Employee.countDocuments({ jobRoleId: role._id, archived: { $ne: true }, isTestAccount: { $ne: true } }),
+            Manager.countDocuments({ jobRoleId: role._id, archived: { $ne: true }, isTestAccount: { $ne: true } }),
         ]);
         if (emps + mgrs > 0) {
             return res.status(409).json({
@@ -292,14 +292,14 @@ const listWorkAccess = async (req, res) => {
         const [employees, managers] = await Promise.all([
             kind === "manager"
                 ? []
-                : Employee.find()
+                : Employee.find({ archived: { $ne: true }, isTestAccount: { $ne: true } })
                     .select("name email manager jobRoleId workModesOverride")
                     .populate("jobRoleId", "name allowedWorkModes")
                     .populate("manager", "name")
                     .sort({ name: 1 }),
             kind === "employee"
                 ? []
-                : Manager.find()
+                : Manager.find({ archived: { $ne: true }, isTestAccount: { $ne: true } })
                     .select("name email jobRoleId workModesOverride")
                     .populate("jobRoleId", "name allowedWorkModes")
                     .sort({ name: 1 }),

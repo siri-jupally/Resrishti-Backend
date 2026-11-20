@@ -10,6 +10,8 @@ const LocationTrail = require("../models/LocationTrail");
 const Task = require("../models/Task");
 const PayrollProfile = require("../models/PayrollProfile");
 const PayrollLine = require("../models/PayrollLine");
+const ManagerAttendance = require("../models/ManagerAttendance");
+const { carryAttendanceEmployeeToManager } = require("../utils/promotionCarry");
 const { sendPush, notifyIfEnabled } = require("../utils/push");
 const { applyJobRole } = require("./workAccessController");
 const { lockBlocksRange } = require("../utils/attendanceLock");
@@ -695,6 +697,9 @@ const CARRIED_PERSON_FIELDS = [
     "jobRole", "jobRoleId", "department", "joiningDate",
     "canSupervise", "canCoordinate", "canPreparePayroll",
     "bank", "bankUpdatedAt", "bankHistory",
+    // Carried so a promotion never drops KYC/compliance docs, push
+    // notifications, or profile detail onto the archived record (audit O3/O4/O6).
+    "kycDocuments", "bloodGroup", "workModesOverride", "pushSubscription",
 ];
 
 function pickCarried(src, keys = CARRIED_PERSON_FIELDS) {
@@ -772,6 +777,11 @@ const promoteEmployeeToManager = async (req, res) => {
         try {
             await carryPassword(Manager, manager._id, employee.password, employee.passwordChangedAt);
             await carryPayrollProfile("Employee", employee._id, "Manager", manager._id);
+            // Carry the check-in history onto the new manager identity, or the
+            // Manager Attendance view reads an empty ledger and shows them
+            // "absent" despite a full record (the rows are never lost, just
+            // detached from the active identity). Idempotent + non-destructive.
+            await carryAttendanceEmployeeToManager(employee._id, manager._id);
 
             // 2. Archive the original employee record — history kept, login closed.
             employee.archived = true;
@@ -784,6 +794,7 @@ const promoteEmployeeToManager = async (req, res) => {
             // Roll back the half-made manager so we never leave two live logins.
             await Manager.deleteOne({ _id: manager._id });
             await PayrollProfile.deleteOne({ personType: "Manager", personId: manager._id });
+            await ManagerAttendance.deleteMany({ manager: manager._id });
             throw inner;
         }
 
@@ -848,6 +859,13 @@ const promoteManagerToAdmin = async (req, res) => {
             manager.archivedReason = "promoted";
             manager.promotedToAdmin = admin._id;
             await manager.save();
+            // Admins are intentionally NOT on payroll — the payroll run
+            // enumerates only Employee + Manager. Retire the manager's old pay
+            // profile so it isn't left `isActive` on an archived record (O7).
+            await PayrollProfile.updateOne(
+                { personType: "Manager", personId: manager._id },
+                { $set: { isActive: false } }
+            );
         } catch (inner) {
             await Admin.deleteOne({ _id: admin._id });
             throw inner;

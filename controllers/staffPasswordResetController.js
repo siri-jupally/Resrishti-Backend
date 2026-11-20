@@ -278,6 +278,7 @@ const resetPassword = (roleKey) => async (req, res) => {
 
 module.exports = {
     ROLES,
+    SENT_OK,
     forgotPassword,
     verifyResetToken,
     resetPassword,

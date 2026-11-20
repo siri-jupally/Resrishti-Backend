@@ -31,7 +31,7 @@ const getManagersAttendance = async (req, res) => {
         const policy = await AttendancePolicy.findOne();
         const dayIsOff = isWeekOff(date, policy);
 
-        const managers = await Manager.find().select("-password");
+        const managers = await Manager.find({ archived: { $ne: true }, isTestAccount: { $ne: true } }).select("-password");
         const managerIds = managers.map((m) => m._id);
 
         const records = await ManagerAttendance.find({
@@ -93,7 +93,7 @@ const getManagersSummary = async (req, res) => {
         const endYear = month === 12 ? year + 1 : year;
         const endDate = `${endYear}-${String(endMonth).padStart(2, "0")}-01`;
 
-        const managers = await Manager.find().select("name email");
+        const managers = await Manager.find({ archived: { $ne: true }, isTestAccount: { $ne: true } }).select("name email");
         const managerIds = managers.map((m) => m._id);
 
         const records = await ManagerAttendance.find({

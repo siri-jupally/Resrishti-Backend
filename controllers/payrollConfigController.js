@@ -333,8 +333,8 @@ const ACCOUNTANT_FIELDS = "name email phone jobRole department payrollAssignedAt
 const listAccountants = async (req, res) => {
     try {
         const [employees, managers] = await Promise.all([
-            Employee.find({ canPreparePayroll: true }).select(ACCOUNTANT_FIELDS).lean(),
-            Manager.find({ canPreparePayroll: true }).select(ACCOUNTANT_FIELDS).lean(),
+            Employee.find({ canPreparePayroll: true, archived: { $ne: true }, isTestAccount: { $ne: true } }).select(ACCOUNTANT_FIELDS).lean(),
+            Manager.find({ canPreparePayroll: true, archived: { $ne: true }, isTestAccount: { $ne: true } }).select(ACCOUNTANT_FIELDS).lean(),
         ]);
         const items = [
             ...employees.map((e) => ({ ...e, personType: "Employee" })),
@@ -362,7 +362,7 @@ const CANDIDATE_LIMIT = 25;
 const listAccountantCandidates = async (req, res) => {
     try {
         const q = String(req.query?.q || "").trim();
-        const filter = { canPreparePayroll: { $ne: true }, isTestAccount: { $ne: true } };
+        const filter = { canPreparePayroll: { $ne: true }, isTestAccount: { $ne: true }, archived: { $ne: true } };
         if (q) {
             // Escaped: a search box is not a place to accept a regex.
             const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -501,8 +501,8 @@ const listRoles = async (req, res) => {
             .lean();
 
         const [emps, mgrs, profiles] = await Promise.all([
-            Employee.find({ jobRoleId: { $ne: null } }).select("jobRoleId").lean(),
-            Manager.find({ jobRoleId: { $ne: null } }).select("jobRoleId").lean(),
+            Employee.find({ jobRoleId: { $ne: null }, archived: { $ne: true }, isTestAccount: { $ne: true } }).select("jobRoleId").lean(),
+            Manager.find({ jobRoleId: { $ne: null }, archived: { $ne: true }, isTestAccount: { $ne: true } }).select("jobRoleId").lean(),
             PayrollProfile.find({}).select("personType personId").lean(),
         ]);
         const onPayroll = new Set(profiles.map((p) => `${p.personType}:${String(p.personId)}`));

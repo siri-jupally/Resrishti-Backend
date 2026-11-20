@@ -34,7 +34,7 @@ const getTeamAttendance = async (req, res) => {
         const dayIsOff = isWeekOff(date, policy);
 
         // Get all employees under this manager
-        const employees = await Employee.find({ manager: req.manager._id }).select(
+        const employees = await Employee.find({ manager: req.manager._id, archived: { $ne: true }, isTestAccount: { $ne: true } }).select(
             "-password"
         );
         const employeeIds = employees.map((e) => e._id);
@@ -104,7 +104,7 @@ const getTeamSummary = async (req, res) => {
         const endYear = month === 12 ? year + 1 : year;
         const endDate = `${endYear}-${String(endMonth).padStart(2, "0")}-01`;
 
-        const employees = await Employee.find({ manager: req.manager._id }).select(
+        const employees = await Employee.find({ manager: req.manager._id, archived: { $ne: true }, isTestAccount: { $ne: true } }).select(
             "name email"
         );
         const employeeIds = employees.map((e) => e._id);
@@ -287,7 +287,7 @@ const setEmployeeWorkMode = async (req, res) => {
 // GET /api/manager/attendance/corrections
 const getCorrectionRequests = async (req, res) => {
     try {
-        const employees = await Employee.find({ manager: req.manager._id }).select("_id");
+        const employees = await Employee.find({ manager: req.manager._id, archived: { $ne: true }, isTestAccount: { $ne: true } }).select("_id");
         const employeeIds = employees.map((e) => e._id);
 
         const statusFilter = req.query.status || "pending";
@@ -412,7 +412,7 @@ const reviewCorrection = async (req, res) => {
 // GET /api/manager/leaves
 const getLeaveRequests = async (req, res) => {
     try {
-        const employees = await Employee.find({ manager: req.manager._id }).select("_id");
+        const employees = await Employee.find({ manager: req.manager._id, archived: { $ne: true }, isTestAccount: { $ne: true } }).select("_id");
         const employeeIds = employees.map((e) => e._id);
 
         const statusFilter = req.query.status || "pending";

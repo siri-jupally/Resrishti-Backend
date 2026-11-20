@@ -306,6 +306,8 @@ async function createPickupForClient({
                 .lean(),
             Manager.find({
                 canCoordinate: true,
+                archived: { $ne: true },
+                isTestAccount: { $ne: true },
                 pushSubscription: { $exists: true, $ne: null },
             })
                 .select("pushSubscription")

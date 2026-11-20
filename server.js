@@ -109,6 +109,7 @@ app.post(
     "/api/manager/login",
     "/api/admin/login",
     "/api/client/login",
+    "/api/auth/login", // unified staff login — same brute-force budget
   ],
   loginLimiter
 );
@@ -153,6 +154,7 @@ app.post("/api/client/forgot-password", passwordResetLimiter);
 app.post("/api/employee/forgot-password", passwordResetLimiter);
 app.post("/api/manager/forgot-password", passwordResetLimiter);
 app.post("/api/admin/forgot-password", passwordResetLimiter);
+app.post("/api/auth/forgot-password", passwordResetLimiter); // unified reset
 
 // Database Connection
 mongoose
@@ -223,6 +225,7 @@ app.use("/api/testimonials", require("./routes/testimonialRoutes"));
 // JWT, no /api rate limiter — because the terminal can't authenticate and polls
 // often. Trust is the device serial allowlist (see biometricController).
 app.use("/iclock", require("./routes/biometricRoutes"));
+app.use("/api/auth", require("./routes/authRoutes")); // unified staff login + reset
 app.use("/api/admin", require("./routes/adminRoutes"));
 app.use("/api/admin/clients", require("./routes/clientRoutes"));
 app.use("/api/blogs", require("./routes/blogRoutes"));
