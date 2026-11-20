@@ -32,6 +32,7 @@ const {
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,
+    getOrgChart,
 } = require('../controllers/adminOrgController');
 const {
     getManagersAttendance,
@@ -165,6 +166,7 @@ router.patch('/leaves/:id', protect, adminReviewLeave);
 
 // Org overview
 router.get('/org/overview', protect, getOrgOverview);
+router.get('/org/chart', protect, getOrgChart);
 
 // Manager attendance oversight
 router.get('/manager-attendance/team', protect, getManagersAttendance);

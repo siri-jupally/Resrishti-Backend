@@ -67,7 +67,10 @@ const createManager = async (req, res) => {
 // GET /api/admin/managers
 const listManagers = async (req, res) => {
     try {
-        const managers = await Manager.find().select("-password").sort({ createdAt: -1 });
+        // Archived managers have left (or were promoted away) — they belong in
+        // the Staff screen's Archived view, not in the active roster here.
+        const managers = await Manager.find({ archived: { $ne: true } })
+            .select("-password").sort({ createdAt: -1 });
 
         // Attach employee count for each manager
         const managerIds = managers.map((m) => m._id);
@@ -153,7 +156,7 @@ const deleteManager = async (req, res) => {
 // GET /api/admin/employees
 const listAllEmployees = async (req, res) => {
     try {
-        const employees = await Employee.find()
+        const employees = await Employee.find({ archived: { $ne: true } })
             .select("-password")
             .populate("manager", "name email")
             .sort({ createdAt: -1 });
@@ -359,8 +362,8 @@ const adminReviewLeave = async (req, res) => {
 const getOrgOverview = async (req, res) => {
     try {
         const [managers, employees, leaveStats, managerLeaveStats] = await Promise.all([
-            Manager.find().select("-password"),
-            Employee.find().select("-password").populate("manager", "name email"),
+            Manager.find({ archived: { $ne: true } }).select("-password"),
+            Employee.find({ archived: { $ne: true } }).select("-password").populate("manager", "name email"),
             Leave.aggregate([
                 { $group: { _id: "$status", count: { $sum: 1 } } },
             ]),
@@ -385,6 +388,85 @@ const getOrgOverview = async (req, res) => {
                     .filter((e) => String(e.manager?._id) === String(m._id))
                     .map((e) => ({ _id: e._id, name: e.name, email: e.email })),
             })),
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// GET /api/admin/org/chart
+// The company as a tree: directors (admins) at the top, then managers, then the
+// employees who report to each. Active, non-test people only. An admin's display
+// name falls back to a matching staff record (even archived) then the email, so
+// a founder who is "just an admin" still reads as their name rather than a login.
+const getOrgChart = async (req, res) => {
+    try {
+        const active = { archived: { $ne: true }, isTestAccount: { $ne: true } };
+        const [admins, managers, employees] = await Promise.all([
+            Admin.find().select("name email").lean(),
+            Manager.find(active)
+                .select("name email jobRole department empNo canPreparePayroll canSupervise canCoordinate")
+                .sort({ name: 1 }).lean(),
+            Employee.find(active)
+                .select("name email jobRole department empNo manager")
+                .sort({ name: 1 }).lean(),
+        ]);
+
+        // The founder's real name often lives on a manager/employee record, not
+        // the bare admin login — borrow it (archived records included).
+        const adminEmails = admins.map((a) => a.email);
+        const [mNamed, eNamed] = await Promise.all([
+            Manager.find({ email: { $in: adminEmails } }).select("name email").lean(),
+            Employee.find({ email: { $in: adminEmails } }).select("name email").lean(),
+        ]);
+        const nameByEmail = new Map();
+        for (const p of [...mNamed, ...eNamed]) if (p.name) nameByEmail.set(p.email, p.name);
+
+        const tagOf = (p) => {
+            const t = [];
+            if (p.canPreparePayroll) t.push("Accountant");
+            if (p.canSupervise) t.push("Pickup agent");
+            if (p.canCoordinate) t.push("Coordinator");
+            return t;
+        };
+        const slim = (p) => ({
+            _id: p._id, name: p.name || p.email, email: p.email,
+            jobRole: p.jobRole || null, department: p.department || null, empNo: p.empNo ?? null,
+        });
+
+        // Bucket each employee under their manager — but only if that manager is
+        // an ACTIVE one. Someone reporting to an archived/removed manager is not
+        // lost: they fall into "unassigned" so they still appear on the chart.
+        const activeManagerIds = new Set(managers.map((m) => String(m._id)));
+        const empByManager = new Map();
+        const unassigned = [];
+        for (const e of employees) {
+            const mid = e.manager ? String(e.manager) : null;
+            if (mid && activeManagerIds.has(mid)) {
+                if (!empByManager.has(mid)) empByManager.set(mid, []);
+                empByManager.get(mid).push(slim(e));
+            } else {
+                unassigned.push(slim(e));
+            }
+        }
+
+        res.json({
+            directors: admins.map((a) => ({
+                _id: a._id,
+                name: a.name || nameByEmail.get(a.email) || a.email,
+                email: a.email,
+            })),
+            managers: managers.map((m) => ({
+                ...slim(m),
+                tags: tagOf(m),
+                employees: empByManager.get(String(m._id)) || [],
+            })),
+            unassigned,
+            counts: {
+                directors: admins.length,
+                managers: managers.length,
+                employees: employees.length,
+            },
         });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -751,6 +833,7 @@ module.exports = {
     getAllLeaveRequests,
     adminReviewLeave,
     getOrgOverview,
+    getOrgChart,
     getMyPickupAgentFlag,
     updateMyPickupAgentFlag,
 };
