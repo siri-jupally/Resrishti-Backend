@@ -71,6 +71,13 @@ const attendanceSchema = new mongoose.Schema(
             enum: ["WFO", "WFH", "remote"],
             default: "WFO",
         },
+        // How this day's record was created: the mobile app (GPS check-in), a
+        // biometric device punch (fingerprint terminal at the office), or a
+        // manual admin/manager entry. Lets reports and the payroll breakdown
+        // show the source of each day.
+        source: { type: String, enum: ["app", "biometric", "manual"], default: "app" },
+        // Serial number of the biometric device, when source === "biometric".
+        biometricDeviceSn: { type: String },
         workingHours: {
             type: Number, // in decimal hours e.g. 8.5
             default: 0,

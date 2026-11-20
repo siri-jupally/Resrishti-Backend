@@ -58,6 +58,9 @@ const managerAttendanceSchema = new mongoose.Schema(
             enum: ["WFO", "WFH", "remote"],
             default: "WFO",
         },
+        // See Attendance.js — how the record was created (app / biometric / manual).
+        source: { type: String, enum: ["app", "biometric", "manual"], default: "app" },
+        biometricDeviceSn: { type: String },
         workingHours: {
             type: Number,
             default: 0,
