@@ -473,6 +473,53 @@ const getOrgChart = async (req, res) => {
     }
 };
 
+// GET /api/admin/pending-approvals
+//
+// One inbox for everything waiting on the admin's yes/no — the dashboard's
+// first-screen priority. Right now that is pending leave requests: a manager's
+// (which the admin approves directly) and an employee's (which the admin can
+// override). Requests from archived or test people are left out — they are
+// stale and must not clutter the queue.
+const getPendingApprovals = async (req, res) => {
+    try {
+        const [empLeaves, mgrLeaves] = await Promise.all([
+            Leave.find({ status: "pending" })
+                .populate("employee", "name email jobRole archived isTestAccount")
+                .sort({ createdAt: -1 }).lean(),
+            ManagerLeave.find({ status: "pending" })
+                .populate("manager", "name email jobRole archived isTestAccount")
+                .sort({ createdAt: -1 }).lean(),
+        ]);
+
+        const daysBetween = (a, b) => {
+            const n = Math.round((new Date(b) - new Date(a)) / 86400000) + 1;
+            return Number.isFinite(n) && n > 0 ? n : 1;
+        };
+        const live = (p) => p && !p.archived && !p.isTestAccount;
+        const mapLeave = (l, kind, person) => ({
+            kind, // "managerLeave" | "employeeLeave"
+            id: String(l._id),
+            role: kind === "managerLeave" ? "Manager" : "Employee",
+            person: { name: person.name || person.email, email: person.email, jobRole: person.jobRole || null },
+            type: l.type || "leave",
+            startDate: l.startDate,
+            endDate: l.endDate,
+            days: daysBetween(l.startDate, l.endDate),
+            reason: l.reason || "",
+            createdAt: l.createdAt,
+        });
+
+        const items = [
+            ...mgrLeaves.filter((l) => live(l.manager)).map((l) => mapLeave(l, "managerLeave", l.manager)),
+            ...empLeaves.filter((l) => live(l.employee)).map((l) => mapLeave(l, "employeeLeave", l.employee)),
+        ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        res.json({ count: items.length, items });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
 // GET /api/admin/me/pickup-agent
 // PATCH /api/admin/me/pickup-agent   body: { canSupervise: boolean }
 //
@@ -834,6 +881,7 @@ module.exports = {
     adminReviewLeave,
     getOrgOverview,
     getOrgChart,
+    getPendingApprovals,
     getMyPickupAgentFlag,
     updateMyPickupAgentFlag,
 };
