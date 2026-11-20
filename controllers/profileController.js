@@ -20,7 +20,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 const PROFILE_FIELDS = [
-    "name", "dateOfBirth", "gender", "phone", "personalEmail",
+    "name", "dateOfBirth", "gender", "bloodGroup", "phone", "personalEmail",
     "emergencyContactName", "emergencyContactPhone", "currentAddress",
     "idProofType", "idProofNumber",
 ];

@@ -88,6 +88,8 @@ const employeeSchema = new mongoose.Schema(
     profilePhoto: { type: String }, // S3 key or URL
     dateOfBirth: { type: String },
     gender: { type: String, enum: ["male", "female", "other", ""] },
+    // Shown on the printed ID card (useful in an emergency). Optional.
+    bloodGroup: { type: String, enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", ""], default: "" },
     phone: { type: String },
     personalEmail: { type: String },
     emergencyContactName: { type: String },

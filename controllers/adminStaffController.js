@@ -26,7 +26,7 @@ const Manager = require("../models/Manager");
 const PayrollProfile = require("../models/PayrollProfile");
 
 const STAFF_FIELDS =
-    "name email phone jobRole department joiningDate profilePhoto " +
+    "name email phone jobRole department joiningDate profilePhoto bloodGroup " +
     "isFirstLogin isProfileComplete bank bankUpdatedAt empNo isTestAccount " +
     "archived archivedAt archivedByName " +
     "canSupervise canCoordinate canPreparePayroll createdAt";
@@ -111,6 +111,7 @@ const listStaff = async (req, res) => {
                 currentRate: latestRate?.amount ?? null,
                 createdAt: person.createdAt || null,
                 empNo: person.empNo ?? null,
+                bloodGroup: person.bloodGroup || null,
                 isTestAccount: Boolean(person.isTestAccount),
                 archived: Boolean(person.archived),
                 archivedByName: person.archivedByName || null,
