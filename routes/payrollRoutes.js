@@ -61,18 +61,28 @@ router.delete("/accountants/:type/:id", protectApprover, config.unassignAccounta
 router.get("/profiles/summary", protectPayroll, profiles.summary);
 router.get("/profiles", protectPayroll, profiles.listProfiles);
 // Literal path, before the /:type/:id routes. Bulk-create profiles for everyone
-// in a role from that role's payroll template. Approver-only (it sets pay).
-router.post("/profiles/apply-role", protectApprover, profiles.applyRole);
+// in a role from that role's payroll template. The accountant sets people up on
+// payroll (protectPreparer); the admin still approves every run before anyone
+// is paid, which is where the maker-checker control actually sits.
+router.post("/profiles/apply-role", protectPreparer, profiles.applyRole);
 router.get("/profiles/:type/:id", protectPayroll, profiles.getProfile);
-router.put("/profiles/:type/:id", protectApprover, profiles.upsertProfile);
-router.post("/profiles/:type/:id/rates", protectApprover, profiles.addRate);
-// Bank details are data entry rather than a pay decision, so the preparer may
-// keep them up to date.
+// Adding someone to payroll and setting/updating their rate — the accountant's
+// job. (approveRun is still admin-only, and refuses a preparer approving their
+// own run, so opening this does not collapse separation of duties.)
+router.put("/profiles/:type/:id", protectPreparer, profiles.upsertProfile);
+router.post("/profiles/:type/:id/rates", protectPreparer, profiles.addRate);
+
+// The accountant maintains a person's salary account and their KYC documents.
+// Bank changes go through the same fraud-safe path as the person's own editor
+// (history + email); KYC is a growing list of labelled docs (Aadhaar, PAN, …).
+router.put("/profiles/:type/:id/bank", protectPreparer, profiles.updateBank);
+router.post("/profiles/:type/:id/kyc", protectPreparer, profiles.kycUpload.single("file"), profiles.addKyc);
+router.delete("/profiles/:type/:id/kyc/:docId", protectPreparer, profiles.removeKyc);
+
 /*
-  Bank details are no longer set here. The employee owns their salary account
-  and fills it in on their own profile; payroll reads it. What payroll can do
-  is ask the people who have not: one call, everybody still missing an
-  account, push and email.
+  Nudge everyone who still has no salary account on file: one call, push + email
+  to each. (The accountant can now also enter an account for someone directly,
+  above, for a person who cannot do it themselves.)
 */
 router.post("/profiles/remind-bank", protectPreparer, profiles.remindMissingBank);
 

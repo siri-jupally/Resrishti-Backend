@@ -119,7 +119,7 @@ describe("cancelling a certificate", () => {
         const saved = await Certificate.findById(cert._id);
         expect(saved.status).toBe("cancelled");
         expect(saved.cancelledReason).toBe("Issued against the wrong client");
-        expect(saved.cancelledBy.name).toBe("a@test.com"); // Admin has no name field; actorFromReq falls back to the email
+        expect(saved.cancelledBy.name).toBe("Ada"); // Admin now has a name field (carried over when a manager is promoted); actorFromReq prefers it over the email
         expect(saved.cancelledAt).toBeTruthy();
     });
 

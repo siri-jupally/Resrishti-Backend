@@ -219,6 +219,10 @@ mongoose
 
 // Routes
 app.use("/api/testimonials", require("./routes/testimonialRoutes"));
+// Device-facing biometric (ZKTeco ADMS) endpoints. Mounted OUTSIDE /api — no
+// JWT, no /api rate limiter — because the terminal can't authenticate and polls
+// often. Trust is the device serial allowlist (see biometricController).
+app.use("/iclock", require("./routes/biometricRoutes"));
 app.use("/api/admin", require("./routes/adminRoutes"));
 app.use("/api/admin/clients", require("./routes/clientRoutes"));
 app.use("/api/blogs", require("./routes/blogRoutes"));

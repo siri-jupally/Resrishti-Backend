@@ -186,8 +186,10 @@ const calculateRun = async (req, res) => {
         const leaveMap = await buildLeaveMap(month);
 
         const [employees, managers, empRecords, mgrRecords] = await Promise.all([
-            Employee.find({}).select("name email department jobRole").lean(),
-            Manager.find({}).select("name email department jobRole").lean(),
+            // Test and archived accounts are never paid — excluded at the source,
+            // so they appear neither as paid lines nor as exceptions.
+            Employee.find({ isTestAccount: { $ne: true }, archived: { $ne: true } }).select("name email department jobRole").lean(),
+            Manager.find({ isTestAccount: { $ne: true }, archived: { $ne: true } }).select("name email department jobRole").lean(),
             Attendance.find({ date: { $gte: start, $lte: end } })
                 .select("employee date status workingHours approvalStatus locationWithinBoundary extraPayExcluded")
                 .lean(),

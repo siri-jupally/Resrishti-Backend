@@ -22,6 +22,11 @@ const {
     listAllEmployees,
     reassignEmployee,
     updateEmployeePermissions,
+    archiveEmployee,
+    archiveManager,
+    deleteEmployeeHard,
+    promoteEmployeeToManager,
+    promoteManagerToAdmin,
     getMyPickupAgentFlag,
     updateMyPickupAgentFlag,
     getAllLeaveRequests,
@@ -141,6 +146,14 @@ router.patch('/attendance/:id/approve', protect, workAccess.adminApproveEmployee
 router.get('/manager-attendance/pending', protect, workAccess.getPendingManagerAttendance);
 // Make an employee a pickup agent (canSupervise) — see updateEmployeePermissions.
 router.patch('/employees/:id/permissions', protect, updateEmployeePermissions);
+// Staff lifecycle: archive (soft, reversible) and hard delete (guarded + cleanup).
+router.patch('/employees/:id/archive', protect, archiveEmployee);
+router.patch('/managers/:id/archive', protect, archiveManager);
+router.delete('/employees/:id', protect, deleteEmployeeHard);
+// Role promotion: employee -> manager, manager -> admin. Carries identity +
+// RES code, archives the original. manager->admin is blocked if they have a team.
+router.post('/employees/:id/promote-to-manager', protect, promoteEmployeeToManager);
+router.post('/managers/:id/promote-to-admin', protect, promoteManagerToAdmin);
 
 // Whether the signed-in admin can be assigned pickups themselves.
 router.get('/me/pickup-agent', protect, getMyPickupAgentFlag);
@@ -184,5 +197,13 @@ router.patch('/notification-settings', protect, updateNotificationSettings);
 // Staff app reviews (read-only list + summary for the admin dashboard)
 const { listReviews } = require('../controllers/appReviewController');
 router.get('/reviews', protect, listReviews);
+
+// Biometric attendance devices (ZKTeco ADMS) — register, monitor, manage.
+const bio = require('../controllers/biometricController');
+router.post('/biometric-devices', protect, bio.registerDevice);
+router.get('/biometric-devices', protect, bio.listDevices);
+router.patch('/biometric-devices/:id', protect, bio.updateDevice);
+router.delete('/biometric-devices/:id', protect, bio.deleteDevice);
+router.get('/biometric-punches', protect, bio.listPunches);
 
 module.exports = router;

@@ -36,6 +36,15 @@ const loginEmployee = async (req, res) => {
     try {
         const employee = await Employee.findOne({ email });
         if (employee && (await employee.comparePassword(password))) {
+            // Archived = this person has left (or was promoted into another
+            // role). Their record is kept for history but must not grant a
+            // login — only revealed after a correct password, so this never
+            // tells an outsider which accounts exist.
+            if (employee.archived) {
+                return res.status(403).json({
+                    message: "This account has been deactivated. Contact your administrator.",
+                });
+            }
             return res.json({
                 _id: employee._id,
                 email: employee.email,

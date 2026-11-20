@@ -492,8 +492,22 @@ describe("the workforce list", () => {
 describe("bank details", () => {
     beforeEach(async () => { await tag(monthlyBody()); });
 
-    test("payroll no longer offers a way to set them", () => {
-        expect(profiles.updateBank).toBeUndefined();
+    test("the accountant/admin can set the person's OWN account (not a payroll copy)", async () => {
+        const res = mockRes();
+        await profiles.updateBank(
+            asAdmin({
+                params: { type: "employee", id: String(employee._id) },
+                body: { bank: { accountHolderName: "Emp", accountNumber: "12345678901", ifsc: "HDFC0001234" } },
+            }),
+            res
+        );
+        expect(res.statusCode).toBe(200);
+        // Written to the person's own bank — the field the bank file and payment
+        // screen read — never a separate copy on the payroll profile.
+        const emp = await Employee.findById(employee._id).lean();
+        expect(emp.bank.accountNumber).toBe("12345678901");
+        const payProfile = await PayrollProfile.findOne({ personId: employee._id }).lean();
+        expect(payProfile.bank?.accountNumber).toBeUndefined();
     });
 
     test("the list reads the person's own account, not a payroll copy", async () => {

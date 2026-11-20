@@ -24,6 +24,8 @@
   account and, when it is missing, asks them for it.
 */
 const mongoose = require("mongoose");
+const multer = require("multer");
+const fs = require("fs");
 
 const PayrollProfile = require("../models/PayrollProfile");
 const PaidDayPolicy = require("../models/PaidDayPolicy");
@@ -34,6 +36,20 @@ const { defaultPolicyFor, seedPaidDayPolicies } = require("../utils/payrollDefau
 const { notifyIfEnabled } = require("../utils/push");
 const { sendEmail } = require("../utils/emailService");
 const { writeAudit } = require("../utils/payrollAudit");
+const { applyBankChange, notifyBankChange } = require("../utils/bankAccount");
+
+// KYC document uploads land in uploads/kyc (served like the other upload dirs).
+const kycStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        fs.mkdirSync("uploads/kyc", { recursive: true });
+        cb(null, "uploads/kyc");
+    },
+    filename: (req, file, cb) => {
+        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+        cb(null, `${Date.now()}-${safe}`);
+    },
+});
+const kycUpload = multer({ storage: kycStorage, limits: { fileSize: 10 * 1024 * 1024 } });
 
 const TYPES = ["Employee", "Manager"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -66,8 +82,9 @@ const listProfiles = async (req, res) => {
         await seedPaidDayPolicies();
 
         const [employees, managers, profiles] = await Promise.all([
-            Employee.find({}).select("name email jobRole jobRoleId department joiningDate manager bank bankUpdatedAt").lean(),
-            Manager.find({}).select("name email jobRole jobRoleId department joiningDate bank bankUpdatedAt").lean(),
+            // Test and archived accounts are kept off the payroll radar entirely.
+            Employee.find({ isTestAccount: { $ne: true }, archived: { $ne: true } }).select("name email jobRole jobRoleId department joiningDate manager bank bankUpdatedAt").lean(),
+            Manager.find({ isTestAccount: { $ne: true }, archived: { $ne: true } }).select("name email jobRole jobRoleId department joiningDate bank bankUpdatedAt").lean(),
             PayrollProfile.find({}).populate("paidDayPolicy", "name payWeeklyOff payHoliday").lean(),
         ]);
 
@@ -207,7 +224,8 @@ const loadPerson = async (req, res) => {
     }
     const person = await modelFor(personType)
         .findById(req.params.id)
-        .select("name email jobRole department joiningDate bank bankUpdatedAt bankHistory")
+        .select("name email jobRole department joiningDate bank bankUpdatedAt bankHistory " +
+            "idProofType idProofNumber idProofDocument kycDocuments")
         .lean();
     if (!person) {
         res.status(404).json({ message: `${personType} not found` });
@@ -240,6 +258,11 @@ const getProfile = async (req, res) => {
             bank: person.bank?.accountNumber ? person.bank : null,
             bankUpdatedAt: person.bankUpdatedAt || null,
             bankChanges: person.bankHistory?.length || 0,
+            // KYC the office holds on them — the accountant maintains this list.
+            kycDocuments: person.kycDocuments || [],
+            idProof: (person.idProofType || person.idProofNumber || person.idProofDocument)
+                ? { type: person.idProofType, number: person.idProofNumber, document: person.idProofDocument }
+                : null,
             // Newest first — the rate in force is what a reader looks for.
             rates: profile
                 ? [...profile.rates].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))
@@ -644,6 +667,114 @@ const applyRole = async (req, res) => {
     }
 };
 
+// Load the person as a saveable doc (loadPerson returns lean). Writes 400/404
+// via res and returns null on failure.
+const loadPersonDoc = async (req, res) => {
+    const personType = normaliseType(req.params.type);
+    if (!personType) { res.status(400).json({ message: "type must be employee or manager" }); return null; }
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) { res.status(400).json({ message: "Invalid id" }); return null; }
+    const person = await modelFor(personType).findById(req.params.id);
+    if (!person) { res.status(404).json({ message: `${personType} not found` }); return null; }
+    return { personType, person };
+};
+
+// PUT /api/payroll/profiles/:type/:id/bank   body { bank: {...} }
+//
+// The accountant maintaining a person's salary account. Goes through the same
+// fraud-safe path as the person's own editor (utils/bankAccount): the previous
+// account is kept in bankHistory, bankUpdatedAt is stamped, and the person is
+// emailed that it changed — so a redirect they did not make is never silent.
+const updateBank = async (req, res) => {
+    try {
+        const found = await loadPersonDoc(req, res);
+        if (!found) return undefined;
+        const { personType, person } = found;
+
+        const changed = applyBankChange(person, req.body.bank, actorName(req) || "Accountant");
+        if (!changed) {
+            return res.status(400).json({ message: "No bank details were provided, or nothing changed." });
+        }
+        await person.save();
+        await notifyBankChange(person);
+        await writeAudit({
+            action: "profile.bank.updated",
+            req,
+            detail: { personType, personId: String(person._id), name: person.name || person.email,
+                accountEndsIn: String(person.bank?.accountNumber || "").slice(-4) },
+        });
+        return res.json({ message: "Bank details updated", bank: person.bank, bankUpdatedAt: person.bankUpdatedAt });
+    } catch (err) {
+        console.error("updateBank error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// POST /api/payroll/profiles/:type/:id/kyc   multipart { kind, label, number, file }
+//
+// Add one KYC document (Aadhaar, PAN, or any labelled proof). A document needs
+// at least a number or an uploaded file to be worth recording.
+const KYC_KINDS = { aadhaar: "Aadhaar", pan: "PAN", other: "Document" };
+const addKyc = async (req, res) => {
+    try {
+        const found = await loadPersonDoc(req, res);
+        if (!found) { if (req.file) fs.unlink(req.file.path, () => {}); return undefined; }
+        const { personType, person } = found;
+
+        const kind = KYC_KINDS[req.body.kind] ? req.body.kind : "other";
+        const number = String(req.body.number || "").trim();
+        const label = String(req.body.label || "").trim() || KYC_KINDS[kind];
+        const file = req.file ? req.file.path.replace(/\\/g, "/") : undefined;
+
+        if (!number && !file) {
+            return res.status(400).json({ message: "Add a document number or a file (or both)." });
+        }
+        const entry = {
+            kind, label, number: number || undefined, file,
+            uploadedAt: new Date(), uploadedByName: actorName(req) || "Accountant",
+        };
+        person.kycDocuments.push(entry);
+        await person.save();
+        await writeAudit({
+            action: "profile.kyc.added",
+            req,
+            detail: { personType, personId: String(person._id), name: person.name || person.email, kind, label },
+        });
+        const saved = person.kycDocuments[person.kycDocuments.length - 1];
+        return res.status(201).json({ message: `${label} added`, document: saved });
+    } catch (err) {
+        if (req.file) fs.unlink(req.file.path, () => {});
+        console.error("addKyc error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+// DELETE /api/payroll/profiles/:type/:id/kyc/:docId
+const removeKyc = async (req, res) => {
+    try {
+        const found = await loadPersonDoc(req, res);
+        if (!found) return undefined;
+        const { personType, person } = found;
+
+        const doc = person.kycDocuments.id(req.params.docId);
+        if (!doc) return res.status(404).json({ message: "Document not found" });
+        const removedLabel = doc.label;
+        const filePath = doc.file;
+        doc.deleteOne();
+        await person.save();
+        // Best-effort: drop the file from disk too, but never fail the request on it.
+        if (filePath) fs.unlink(filePath, () => {});
+        await writeAudit({
+            action: "profile.kyc.removed",
+            req,
+            detail: { personType, personId: String(person._id), name: person.name || person.email, label: removedLabel },
+        });
+        return res.json({ message: `${removedLabel} removed` });
+    } catch (err) {
+        console.error("removeKyc error:", err.message);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
 module.exports = {
     listProfiles,
     summary,
@@ -652,4 +783,8 @@ module.exports = {
     addRate,
     remindMissingBank,
     applyRole,
+    updateBank,
+    addKyc,
+    removeKyc,
+    kycUpload,
 };

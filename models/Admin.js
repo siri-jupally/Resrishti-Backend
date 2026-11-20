@@ -2,6 +2,9 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const adminSchema = new mongoose.Schema({
+    // Carried over when an admin is created by promoting a manager, so the
+    // person still has a display name. Optional — seeded/legacy admins have none.
+    name: { type: String, trim: true },
     email: {
         type: String,
         required: true,
@@ -17,6 +20,11 @@ const adminSchema = new mongoose.Schema({
     // so a reset ends every other session.
     passwordChangedAt: { type: Date },
     pushSubscription: { type: Object },
+
+    // Set when this admin was created by promoting a manager, so the person's
+    // history on the old Manager/Employee records can be traced from here.
+    promotedFromManager: { type: mongoose.Schema.Types.ObjectId, ref: "Manager" },
+    promotedAt: { type: Date },
 
     // Client-Management module — job tags (not roles).
     // Admins default to canCoordinate=true (they triage incoming requests).

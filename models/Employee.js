@@ -21,6 +21,30 @@ const bcrypt = require("bcryptjs");
 const employeeSchema = new mongoose.Schema(
   {
     name: { type: String },
+    // Human-readable staff code, e.g. 7 -> shown as "RES-0007" (see
+    // utils/staffCode.js). The NUMBER is immutable once assigned and is ALSO the
+    // User ID enrolled on the biometric attendance device, so it must stay
+    // unique across Employees AND Managers — both draw from one shared sequence
+    // (models/Counter.js). Assigned on create; existing staff are backfilled by
+    // scripts/backfillEmpNo.js. sparse: records without one don't collide on null.
+    empNo: { type: Number, unique: true, sparse: true, index: true },
+    // Marks an account the Cosmiron/dev team uses only for testing. Test
+    // accounts are deliberately left OUT of staff-code assignment (no empNo, no
+    // biometric enrolment) — see utils/staffCode.js consumers and
+    // scripts/backfillEmpNo.js.
+    isTestAccount: { type: Boolean, default: false },
+    // Soft-delete for staff who have left. Archived people keep all their
+    // history but drop out of active staff lists and out of new payroll runs /
+    // biometric mapping. Reversible (unarchive). Prefer this over a hard delete
+    // for anyone who was ever paid.
+    archived: { type: Boolean, default: false },
+    archivedAt: { type: Date },
+    archivedByName: { type: String, trim: true },
+    // Why this record was archived: "left" (default when empty) vs "promoted".
+    // A promoted record is kept intact for history; the person now lives as a
+    // Manager (see promotedToManager) and logs in through that portal.
+    archivedReason: { type: String, enum: ["left", "promoted", ""], default: "" },
+    promotedToManager: { type: mongoose.Schema.Types.ObjectId, ref: "Manager" },
     email: {
       type: String,
       required: true,
@@ -72,6 +96,24 @@ const employeeSchema = new mongoose.Schema(
     idProofType: { type: String, enum: ["aadhaar", "pan", "passport", ""] },
     idProofNumber: { type: String },
     idProofDocument: { type: String }, // S3 key or URL
+
+    /*
+      KYC documents the payroll accountant (or an admin) collects for this
+      person — Aadhaar, PAN, and any other labelled proof. Separate from the
+      single idProof* fields above, which the person fills in during their own
+      first-login setup; this is a growing list the office maintains. Each entry
+      keeps who uploaded it and when, so there is an audit trail on sensitive ID.
+    */
+    kycDocuments: [
+        {
+            kind: { type: String, enum: ["aadhaar", "pan", "other"], default: "other" },
+            label: { type: String, trim: true },   // "Aadhaar", "PAN", "Driving Licence"...
+            number: { type: String, trim: true },  // the document's own number, if any
+            file: { type: String },                // uploaded file path (uploads/kyc/...)
+            uploadedAt: { type: Date, default: Date.now },
+            uploadedByName: { type: String, trim: true },
+        },
+    ],
 
     /*
       Bank account for salary. The person's own, not payroll's.
